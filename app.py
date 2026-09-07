@@ -209,6 +209,7 @@ start = pd.Timestamp(fecha_desde)
 base = df[
     (df["_sucursal"] == sucursal) &
     (df["_fecha"].notna()) &
+    (df["_fecha"] >= start) &  # <-- Esta es la línea nueva que agregamos
     (df["_fecha"] <= end) &
     (df["_caso"].isin(casos))
 ].copy()
