@@ -1,4 +1,3 @@
-
 import io
 from datetime import date, timedelta
 import pandas as pd
@@ -37,16 +36,25 @@ ALIASES = {
         "Fecha Creacion", "Fecha Creación", "Fecha de Creacion",
         "Fecha de Creación", "Fecha Apertura", "Fecha de Apertura"
     ],
+    "fecha_calendario": [
+        "Fecha Calendario", "Fecha calendario", "FECHA CALENDARIO",
+        "Calendario", "Fecha de Calendario"
+    ],
     "estado": ["Estado", "ESTADO"],
     "sucursal": ["Sucursal", "SUCURSAL"],
     "caso": ["Caso Asociado", "Caso asociado", "Caso", "CASO ASOCIADO"],
     "localidad": ["Localidad", "Ciudad", "LOCALIDAD", "CIUDAD"],
     "tipo_os": ["Tipo de OS", "Tipo OS", "Tipo", "TIPO DE OS"],
-    "fecha_cierre": [
+
+        "fecha_cierre": [
         "Fecha Cierre", "Fecha Cierre OS", "Fecha de Cierre",
         "Fecha Cerrada", "Fecha Cerrado"
     ],
+    "confeccionado_por": [
+        "Confeccionada por", "Confeccionada por..", "Confeccionado por"
+    ]
 }
+
 
 def norm(x):
     s = str(x).strip().lower()
@@ -257,11 +265,12 @@ st.info(
 
 tabs = st.tabs([
     "📊 Situación actual",
-    "📅 Antigüedad",
-    "🔎 Detalle",
-    "👷 Planificación de cuadrillas",
+    "⏳ Antigüedad",
+    "📝 Detalle",
+    "👷‍♂️ Planificación de cuadrillas",
     "📈 Proyección día a día",
-    "📥 Exportar"
+    "📥 Exportar",
+    "👷‍♂️ Productividad"
 ])
 
 # ============================================================
@@ -539,6 +548,423 @@ with tabs[5]:
         file_name=f"analisis_OS_{sucursal}_{fecha_hasta.strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+
+# =========================================================================
+# TAB 7 - PRODUCTIVIDAD
+# =========================================================================
+with tabs[6]:
+    st.subheader("👤 Productividad por Personal")
+    st.write(
+        "Medición de órdenes según la columna 'Fecha Calendario', "
+        "independiente del período general de la barra lateral."
+    )
+
+    # ---------------------------------------------------------
+    # Columnas reales detectadas
+    # ---------------------------------------------------------
+    col_usuario = col.get("confeccionado_por") or find_col(
+        df, ["Confeccionada Por", "Confeccionada por", "Confeccionado Por"]
+    )
+    col_fecha_medicion = col.get("fecha_calendario") or find_col(
+        df, ["Fecha Calendario", "Calendario", "Fecha de Calendario"]
+    )
+    col_estado_prod = col.get("estado") or find_col(df, ["Estado", "ESTADO"])
+    col_sucursal_prod = col.get("sucursal") or find_col(df, ["Sucursal", "SUCURSAL"])
+
+    if not col_fecha_medicion:
+        st.error(
+            "No se encontró la columna 'Fecha Calendario'. "
+            "Columnas detectadas: " + ", ".join(map(str, df.columns))
+        )
+        st.stop()
+
+    if not col_usuario:
+        st.error("No se encontró la columna 'Confeccionada Por'.")
+        st.stop()
+
+    if not col_estado_prod:
+        st.error("No se encontró la columna 'Estado'.")
+        st.stop()
+
+    if not col_sucursal_prod:
+        st.error("No se encontró la columna 'Sucursal'.")
+        st.stop()
+
+    # ---------------------------------------------------------
+    # Preparar base exclusiva de productividad
+    # ---------------------------------------------------------
+    df_prod_base = df.copy()
+
+    df_prod_base["_fecha_productividad"] = pd.to_datetime(
+        df_prod_base[col_fecha_medicion],
+        errors="coerce",
+        dayfirst=True
+    )
+
+    df_prod_base["_usuario_productividad"] = (
+        df_prod_base[col_usuario]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    df_prod_base["_estado_productividad"] = (
+        df_prod_base[col_estado_prod]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    df_prod_base["_sucursal_productividad"] = (
+        df_prod_base[col_sucursal_prod]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    fechas_prod_validas = df_prod_base["_fecha_productividad"].dropna()
+
+    if fechas_prod_validas.empty:
+        st.error("La columna 'Fecha Calendario' no contiene fechas válidas.")
+        st.stop()
+
+    min_prod_date = fechas_prod_validas.min().date()
+    max_prod_date = fechas_prod_validas.max().date()
+
+    # ---------------------------------------------------------
+    # Selector de período PROPIO de Productividad
+    # ---------------------------------------------------------
+    st.markdown("### 📅 Período de productividad")
+
+    tipo_periodo = st.radio(
+        "Seleccionar período",
+        ["Día", "Semana", "Mes", "Período personalizado"],
+        horizontal=True,
+        key="productividad_tipo_periodo"
+    )
+
+    prod_desde = None
+    prod_hasta = None
+
+    if tipo_periodo == "Día":
+        fecha_elegida = st.date_input(
+            "Elegir día",
+            value=(fecha_hasta if min_prod_date <= fecha_hasta <= max_prod_date else max_prod_date),
+            min_value=min_prod_date,
+            max_value=max_prod_date,
+            key="productividad_dia"
+        )
+        prod_desde = fecha_elegida
+        prod_hasta = fecha_elegida
+
+    elif tipo_periodo == "Semana":
+        fecha_elegida = st.date_input(
+            "Elegir cualquier día de la semana",
+            value=(fecha_hasta if min_prod_date <= fecha_hasta <= max_prod_date else max_prod_date),
+            min_value=min_prod_date,
+            max_value=max_prod_date,
+            key="productividad_semana"
+        )
+        prod_desde = fecha_elegida - timedelta(days=fecha_elegida.weekday())
+        prod_hasta = prod_desde + timedelta(days=6)
+
+        st.info(
+            f"Semana seleccionada: **{prod_desde.strftime('%d/%m/%Y')}** "
+            f"al **{prod_hasta.strftime('%d/%m/%Y')}**"
+        )
+
+    elif tipo_periodo == "Mes":
+        fecha_elegida = st.date_input(
+            "Elegir cualquier día del mes",
+            value=(fecha_hasta if min_prod_date <= fecha_hasta <= max_prod_date else max_prod_date),
+            min_value=min_prod_date,
+            max_value=max_prod_date,
+            key="productividad_mes"
+        )
+        prod_desde = fecha_elegida.replace(day=1)
+        siguiente_mes = pd.Timestamp(prod_desde) + pd.offsets.MonthBegin(1)
+        prod_hasta = (siguiente_mes - pd.Timedelta(days=1)).date()
+
+        st.info(
+            f"Mes seleccionado: **{fecha_elegida.strftime('%m/%Y')}** "
+            f"({prod_desde.strftime('%d/%m/%Y')} al {prod_hasta.strftime('%d/%m/%Y')})"
+        )
+
+    else:
+        pc1, pc2 = st.columns(2)
+
+        with pc1:
+            prod_desde = st.date_input(
+                "Desde",
+                value=(fecha_desde if min_prod_date <= fecha_desde <= max_prod_date else min_prod_date),
+                min_value=min_prod_date,
+                max_value=max_prod_date,
+                key="productividad_desde"
+            )
+
+        with pc2:
+            prod_hasta = st.date_input(
+                "Hasta",
+                value=(fecha_hasta if min_prod_date <= fecha_hasta <= max_prod_date else max_prod_date),
+                min_value=min_prod_date,
+                max_value=max_prod_date,
+                key="productividad_hasta"
+            )
+
+        if prod_desde > prod_hasta:
+            st.error("La fecha Desde no puede ser posterior a Hasta.")
+            st.stop()
+
+    # ---------------------------------------------------------
+    # Límites correctos: incluye TODO el último día aunque tenga hora
+    # ---------------------------------------------------------
+    fecha_inicio_prod = pd.Timestamp(prod_desde).normalize()
+    fecha_fin_exclusiva_prod = (
+        pd.Timestamp(prod_hasta).normalize() + pd.Timedelta(days=1)
+    )
+
+    # ---------------------------------------------------------
+    # Filtro de Productividad
+    # IMPORTANTE: NO usa start/end del período general.
+    # Usa exclusivamente prod_desde/prod_hasta.
+    # ---------------------------------------------------------
+    criterio_prod = (
+        df_prod_base["_fecha_productividad"].notna()
+        & (df_prod_base["_fecha_productividad"] >= fecha_inicio_prod)
+        & (df_prod_base["_fecha_productividad"] < fecha_fin_exclusiva_prod)
+    )
+
+    if sucursal and str(sucursal).strip().upper() != "TODAS":
+        criterio_prod = criterio_prod & (
+            df_prod_base["_sucursal_productividad"]
+            == str(sucursal).strip().upper()
+        )
+
+    df_prod = df_prod_base.loc[criterio_prod].copy()
+
+    # ---------------------------------------------------------
+    # Conteo por operador
+    # ---------------------------------------------------------
+    # Productividad = órdenes CERRADAS por Fecha Calendario.
+    df_prod_cerradas = df_prod[
+        df_prod["_estado_productividad"] == "CERRADA"
+    ].copy()
+
+    # El usuario debe existir.
+    df_prod_cerradas = df_prod_cerradas[
+        df_prod_cerradas["_usuario_productividad"].ne("")
+        & df_prod_cerradas["_usuario_productividad"].ne("NAN")
+        & df_prod_cerradas["_usuario_productividad"].ne("NONE")
+    ].copy()
+
+    # Total de órdenes y cerradas por operador.
+    totales_por_usuario = (
+        df_prod.groupby("_usuario_productividad")
+        .size()
+        .reset_index(name="Total Órdenes")
+    )
+
+    cerradas_por_usuario = (
+        df_prod_cerradas.groupby("_usuario_productividad")
+        .size()
+        .reset_index(name="Órdenes Cerradas")
+    )
+
+    prod_data = totales_por_usuario.merge(
+        cerradas_por_usuario,
+        on="_usuario_productividad",
+        how="left"
+    )
+
+    prod_data["Órdenes Cerradas"] = (
+        prod_data["Órdenes Cerradas"].fillna(0).astype(int)
+    )
+
+    prod_data["Efectividad Cierre (%)"] = (
+        prod_data["Órdenes Cerradas"]
+        .div(prod_data["Total Órdenes"].replace(0, pd.NA))
+        .fillna(0)
+        .mul(100)
+        .round(1)
+    )
+
+    prod_data = prod_data.rename(
+        columns={"_usuario_productividad": "Confeccionada Por"}
+    )
+
+    prod_data = prod_data.sort_values(
+        by="Órdenes Cerradas",
+        ascending=False
+    )
+
+    # ---------------------------------------------------------
+    # Indicadores generales
+    # ---------------------------------------------------------
+    total_periodo = len(df_prod)
+    total_cerradas = len(df_prod_cerradas)
+    operadores_activos = len(prod_data)
+    dias_periodo = (prod_hasta - prod_desde).days + 1
+    promedio_dia = total_cerradas / dias_periodo if dias_periodo else 0
+
+    st.markdown("---")
+    st.info(
+        f"🔎 **Productividad:** {prod_desde.strftime('%d/%m/%Y')} al "
+        f"{prod_hasta.strftime('%d/%m/%Y')} | **Sucursal:** {sucursal} | "
+        f"**Fecha utilizada:** {col_fecha_medicion}"
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Órdenes del período", fmt(total_periodo))
+    c2.metric("Órdenes cerradas", fmt(total_cerradas))
+    c3.metric("Operadores activos", fmt(operadores_activos))
+    c4.metric("Promedio cierres/día", f"{promedio_dia:.1f}")
+
+    # ---------------------------------------------------------
+    # Rendimiento detallado
+    # ---------------------------------------------------------
+    st.markdown("### 📋 Rendimiento detallado")
+
+    if prod_data.empty:
+        st.warning("No se encontraron órdenes cerradas para el período seleccionado.")
+    else:
+        grafico_data = prod_data.set_index("Confeccionada Por")[
+            ["Total Órdenes", "Órdenes Cerradas"]
+        ]
+        st.bar_chart(grafico_data)
+        st.dataframe(
+            prod_data,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.success(
+            f"TOTAL DE ÓRDENES CERRADAS: **{fmt(total_cerradas)}**"
+        )
+
+    # ---------------------------------------------------------
+    # Productividad día por día
+    # ---------------------------------------------------------
+    st.markdown("### 📅 Productividad día por día")
+
+    if df_prod_cerradas.empty:
+        st.info("No hay cierres para mostrar día por día.")
+    else:
+        df_prod_cerradas["_dia"] = (
+            df_prod_cerradas["_fecha_productividad"].dt.normalize()
+        )
+
+        rango_dias = pd.date_range(
+            fecha_inicio_prod,
+            fecha_fin_exclusiva_prod - pd.Timedelta(days=1),
+            freq="D"
+        )
+
+        diario = (
+            df_prod_cerradas.groupby("_dia")
+            .size()
+            .reindex(rango_dias, fill_value=0)
+            .rename("Órdenes Cerradas")
+            .reset_index()
+        )
+
+        # Si el DatetimeIndex creado por reindex no tiene nombre,
+        # pandas genera la primera columna como "index".
+        # La convertimos siempre en "Fecha".
+        if "Fecha" not in diario.columns:
+            diario = diario.rename(columns={
+                diario.columns[0]: "Fecha"
+            })
+
+        diario["Fecha"] = pd.to_datetime(
+            diario["Fecha"],
+            errors="coerce"
+        )
+
+        diario_mostrar = diario.copy()
+        diario_mostrar["Fecha"] = diario_mostrar["Fecha"].dt.strftime(
+            "%d/%m/%Y"
+        )
+
+        st.dataframe(
+            diario_mostrar,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.bar_chart(
+            diario.set_index("Fecha")["Órdenes Cerradas"]
+        )
+
+    # ---------------------------------------------------------
+    # Matriz operador / día
+    # ---------------------------------------------------------
+    st.markdown("### 👤📅 Cierres por operador y día")
+
+    if df_prod_cerradas.empty:
+        st.info("No hay datos para construir la matriz.")
+    else:
+        matriz = pd.pivot_table(
+            df_prod_cerradas,
+            index="_usuario_productividad",
+            columns="_dia",
+            values="_estado_productividad",
+            aggfunc="count",
+            fill_value=0
+        )
+
+        matriz = matriz.reindex(
+            columns=rango_dias,
+            fill_value=0
+        )
+
+        matriz["TOTAL"] = matriz.sum(axis=1)
+        matriz = matriz.sort_values("TOTAL", ascending=False)
+        matriz = matriz.reset_index()
+        matriz = matriz.rename(
+            columns={"_usuario_productividad": "Confeccionada Por"}
+        )
+
+        nuevas_columnas = []
+        for c in matriz.columns:
+            if c == "Confeccionada Por" or c == "TOTAL":
+                nuevas_columnas.append(c)
+            else:
+                nuevas_columnas.append(pd.Timestamp(c).strftime("%d/%m"))
+        matriz.columns = nuevas_columnas
+
+        st.dataframe(
+            matriz,
+            use_container_width=True,
+            hide_index=True
+        )
+
+    # ---------------------------------------------------------
+    # Control técnico específico de Productividad
+    # ---------------------------------------------------------
+    with st.expander("🔧 Control de Productividad"):
+        st.write("Columna de fecha utilizada:", col_fecha_medicion)
+        st.write("Columna de usuario utilizada:", col_usuario)
+        st.write("Columna de estado utilizada:", col_estado_prod)
+        st.write("Columna de sucursal utilizada:", col_sucursal_prod)
+        st.write("Fecha desde:", prod_desde)
+        st.write("Fecha hasta:", prod_hasta)
+        st.write("Inicio real del filtro:", fecha_inicio_prod)
+        st.write("Fin exclusivo real del filtro:", fecha_fin_exclusiva_prod)
+        st.write("Registros encontrados en período:", len(df_prod))
+        st.write("Registros CERRADA:", len(df_prod_cerradas))
+        st.write("Estados dentro del período:")
+        st.dataframe(
+            df_prod["_estado_productividad"]
+            .value_counts()
+            .rename_axis("Estado")
+            .reset_index(name="Cantidad"),
+            use_container_width=True,
+            hide_index=True
+        )
+
 
 # ============================================================
 # CONTROL
