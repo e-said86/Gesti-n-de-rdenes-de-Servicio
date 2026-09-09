@@ -1037,7 +1037,7 @@ with tabs[5]:
     elif not proj.empty:
         st.dataframe(proj, use_container_width=True, hide_index=True)
         st.line_chart(proj.set_index("Fecha")["Backlog final"])
-        fin = _pdf_proj.iloc[-1]
+        fin = proj.iloc[-1]
         dias_teoricos = pendientes_n / saldo if saldo > 0 else 0
         st.info(
             f"Con los parámetros actuales, la reducción neta es de **{saldo:.1f} OS/día** y "
