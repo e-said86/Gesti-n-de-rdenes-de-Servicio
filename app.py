@@ -596,7 +596,7 @@ with tabs[4]:
     st.markdown("### 📅 Período de productividad")
     st.info(
         f"La productividad se calcula **exclusivamente sobre el período general seleccionado**: "
-        f"**{_export_start.strftime('%d/%m/%Y')} al {_export_end.strftime('%d/%m/%Y')}**. "
+        f"**{prod_desde.strftime('%d/%m/%Y')} al {prod_hasta.strftime('%d/%m/%Y')}**. "
         f"Se utiliza **{col_fecha_medicion}** y el estado **CERRADA**."
     )
 
