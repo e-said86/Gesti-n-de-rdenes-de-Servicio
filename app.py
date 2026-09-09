@@ -1067,13 +1067,18 @@ with tabs[5]:
 # GENERADOR DE PDF - INFORME EJECUTIVO
 # ============================================================
 def generar_pdf_informe(export_desde=None, export_hasta=None):
-    """Genera un informe PDF dinámico con el mismo enfoque visual.
-    Si se reciben export_desde/export_hasta, el informe usa ese período
-    independientemente del período general de la barra lateral.
+    """Genera un informe ejecutivo integral en PDF.
+
+    El informe respeta el período y los filtros seleccionados y toma como
+    referencia la estructura del informe "ANÁLISIS Y PLANIFICACIÓN DE
+    INSTALACIONES": resumen ejecutivo, indicadores, histórico, ingresos,
+    antigüedad, capacidad, escenarios, plan operativo, productividad,
+    cierres por operador/día/caso, proyección, observaciones, propuestas,
+    tablero de seguimiento y metodología.
     """
     try:
         from reportlab.lib import colors
-        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        from reportlab.lib.enums import TA_CENTER
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.units import cm
@@ -1081,11 +1086,9 @@ def generar_pdf_informe(export_desde=None, export_hasta=None):
             SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
             PageBreak, KeepTogether
         )
-        from reportlab.graphics.shapes import Drawing
+        from reportlab.graphics.shapes import Drawing, String
         from reportlab.graphics.charts.barcharts import VerticalBarChart
         from reportlab.graphics.charts.linecharts import HorizontalLineChart
-        from reportlab.graphics.charts.legends import Legend
-        from reportlab.lib.colors import HexColor
     except ImportError as e:
         raise RuntimeError(
             "Para generar PDF falta la librería reportlab. "
@@ -1093,224 +1096,286 @@ def generar_pdf_informe(export_desde=None, export_hasta=None):
         ) from e
 
     # ---------------------------------------------------------
-    # Período específico de exportación
+    # 1. Período del PDF
     # ---------------------------------------------------------
     if export_desde is not None and export_hasta is not None:
-        _export_start = pd.Timestamp(export_desde)
-        _export_end = pd.Timestamp(export_hasta)
+        pdf_desde = pd.Timestamp(export_desde).normalize()
+        pdf_hasta = pd.Timestamp(export_hasta).normalize()
+    else:
+        pdf_desde = pd.Timestamp(fecha_desde).normalize()
+        pdf_hasta = pd.Timestamp(fecha_hasta).normalize()
 
-        # Recalculamos la base para que el PDF respete el período elegido
-        # en la pestaña Exportar y no el período de la barra lateral.
-        base = df[
-            (df["_sucursal"].isin(sucursal)) &
-            (df["_fecha"].notna()) &
-            (df["_fecha"] >= _export_start.normalize()) &
-            (df["_fecha"] < (_export_end.normalize() + pd.Timedelta(days=1))) &
-            (df["_caso"].isin(casos))
-        ].copy()
+    if pdf_desde > pdf_hasta:
+        raise ValueError("El período de exportación no es válido: Desde es posterior a Hasta.")
 
-        base["antiguedad"] = (_export_end - base["_fecha"]).dt.days
-        base["situacion"] = base["_estado"].apply(
-            lambda x:
-                "Realizado" if x in REALIZADO else
-                "Falta hacer" if x in PENDIENTES else
-                "Anulado" if x in ANULADO else
-                "Otro estado"
+    pdf_end_exclusive = pdf_hasta + pd.Timedelta(days=1)
+    periodo_dias = (pdf_hasta.date() - pdf_desde.date()).days + 1
+    suc_txt = ", ".join(sucursal) if sucursal else "Todas"
+    periodo_txt = f"{pdf_desde.strftime('%d/%m/%Y')} al {pdf_hasta.strftime('%d/%m/%Y')}"
+    fecha_generacion = date.today().strftime("%d/%m/%Y")
+
+    # ---------------------------------------------------------
+    # 2. Base del período exportado
+    # ---------------------------------------------------------
+    pdf_base = df[
+        (df["_sucursal"].isin(sucursal)) &
+        (df["_fecha"].notna()) &
+        (df["_fecha"] >= pdf_desde) &
+        (df["_fecha"] < pdf_end_exclusive) &
+        (df["_caso"].isin(casos))
+    ].copy()
+
+    pdf_base["antiguedad"] = (pdf_hasta - pdf_base["_fecha"]).dt.days
+    pdf_base["situacion"] = pdf_base["_estado"].apply(
+        lambda x:
+            "Realizado" if x in REALIZADO else
+            "Falta hacer" if x in PENDIENTES else
+            "Anulado" if x in ANULADO else
+            "Otro estado"
+    )
+
+    pdf_realizados = pdf_base[pdf_base["situacion"] == "Realizado"].copy()
+    pdf_pendientes = pdf_base[pdf_base["situacion"] == "Falta hacer"].copy()
+    pdf_anulados = pdf_base[pdf_base["situacion"] == "Anulado"].copy()
+    pdf_otros = pdf_base[pdf_base["situacion"] == "Otro estado"].copy()
+    pdf_pendientes["intervalo"] = pdf_pendientes["antiguedad"].apply(age_bucket)
+
+    total_base = len(pdf_base)
+    total_realizados = len(pdf_realizados)
+    total_pendientes = len(pdf_pendientes)
+    total_anulados = len(pdf_anulados)
+    total_otros = len(pdf_otros)
+    # Porcentaje de pendientes sobre el total de OS analizadas.
+    # Se calcula aquí porque el texto del punto 12 del PDF lo utiliza.
+    pct_pend = (total_pendientes / total_base * 100) if total_base else 0.0
+
+    # ---------------------------------------------------------
+    # 3. Productividad: Fecha Calendario + CERRADA
+    # ---------------------------------------------------------
+    if not col_fecha_medicion or not col_usuario or not col_estado_prod or not col_sucursal_prod:
+        raise RuntimeError(
+            "No se pudieron identificar las columnas necesarias para productividad "
+            "(Fecha Calendario, Confeccionada Por, Estado o Sucursal)."
         )
 
-        realizados = base[base["situacion"] == "Realizado"].copy()
-        pendientes = base[base["situacion"] == "Falta hacer"].copy()
-        anulados = base[base["situacion"] == "Anulado"].copy()
-        otros = base[base["situacion"] == "Otro estado"].copy()
-        pendientes["intervalo"] = pendientes["antiguedad"].apply(age_bucket)
+    pdf_prod_all = df.copy()
+    pdf_prod_all["_pdf_fecha"] = pd.to_datetime(
+        pdf_prod_all[col_fecha_medicion], errors="coerce", dayfirst=True
+    )
+    pdf_prod_all["_pdf_usuario"] = (
+        pdf_prod_all[col_usuario].fillna("").astype(str).str.strip()
+    )
+    pdf_prod_all["_pdf_estado"] = (
+        pdf_prod_all[col_estado_prod].fillna("").astype(str).str.strip().str.upper()
+    )
+    pdf_prod_all["_pdf_sucursal"] = (
+        pdf_prod_all[col_sucursal_prod].fillna("").astype(str).str.strip().str.upper()
+    )
+    pdf_prod_all = pdf_prod_all[
+        pdf_prod_all["_pdf_fecha"].notna()
+        & (pdf_prod_all["_pdf_fecha"] >= pdf_desde)
+        & (pdf_prod_all["_pdf_fecha"] < pdf_end_exclusive)
+        & pdf_prod_all["_pdf_sucursal"].isin([str(x).strip().upper() for x in sucursal])
+        & pdf_prod_all["_caso"].isin(casos)
+    ].copy()
 
-        entradas_periodo = base[
-            (base["_fecha"] >= _export_start) &
-            (base["_fecha"] <= _export_end)
-        ].copy()
+    pdf_prod = pdf_prod_all[
+        (pdf_prod_all["_pdf_estado"] == "CERRADA")
+        & pdf_prod_all["_pdf_usuario"].ne("")
+        & ~pdf_prod_all["_pdf_usuario"].str.upper().isin(["NAN", "NONE"])
+    ].copy()
+    pdf_prod["_pdf_dia"] = pdf_prod["_pdf_fecha"].dt.normalize()
 
-        tabla = pd.crosstab(base["_caso"], base["situacion"])
-        for _estado in ["Realizado", "Falta hacer", "Anulado", "Otro estado"]:
-            if _estado not in tabla.columns:
-                tabla[_estado] = 0
-        tabla["Total"] = tabla.sum(axis=1)
-        tabla = tabla.reset_index().rename(columns={"_caso": "Caso"})
-        tabla = tabla[["Caso", "Realizado", "Falta hacer", "Anulado", "Otro estado", "Total"]]
+    rango_dias = pd.date_range(pdf_desde, pdf_hasta, freq="D")
+    cierres_dia = pdf_prod.groupby("_pdf_dia").size() if not pdf_prod.empty else pd.Series(dtype=float)
+    pdf_diario = pd.DataFrame({"Fecha": rango_dias})
+    pdf_diario["OS Cerradas"] = pdf_diario["Fecha"].map(cierres_dia).fillna(0).astype(int)
+
+    prod_cierres = len(pdf_prod)
+    prod_prom_calendario = safe_div(prod_cierres, periodo_dias)
+    dias_con_produccion = int((pdf_diario["OS Cerradas"] > 0).sum())
+    prod_prom_produccion = safe_div(prod_cierres, dias_con_produccion)
+
+    prod_operador = (
+        pdf_prod.groupby("_pdf_usuario").size()
+        .reset_index(name="Órdenes Cerradas")
+        if not pdf_prod.empty else
+        pd.DataFrame(columns=["_pdf_usuario", "Órdenes Cerradas"])
+    )
+    total_operador = (
+        pdf_prod_all.groupby("_pdf_usuario").size()
+        .reset_index(name="Total Órdenes")
+        if not pdf_prod_all.empty else
+        pd.DataFrame(columns=["_pdf_usuario", "Total Órdenes"])
+    )
+    pdf_prod_data = total_operador.merge(prod_operador, on="_pdf_usuario", how="left")
+    if not pdf_prod_data.empty:
+        pdf_prod_data["Órdenes Cerradas"] = pdf_prod_data["Órdenes Cerradas"].fillna(0).astype(int)
+        pdf_prod_data["Efectividad Cierre (%)"] = (
+            pdf_prod_data["Órdenes Cerradas"]
+            .div(pdf_prod_data["Total Órdenes"].replace(0, pd.NA))
+            .fillna(0).mul(100).round(1)
+        )
+        pdf_prod_data = pdf_prod_data.rename(columns={"_pdf_usuario": "Confeccionada Por"})
+        pdf_prod_data = pdf_prod_data.sort_values(
+            ["Órdenes Cerradas", "Confeccionada Por"], ascending=[False, True]
+        )
     else:
-        _export_start = pd.Timestamp(fecha_desde)
-        _export_end = pd.Timestamp(fecha_hasta)
+        pdf_prod_data = pd.DataFrame(
+            columns=["Confeccionada Por", "Total Órdenes", "Órdenes Cerradas", "Efectividad Cierre (%)"]
+        )
+
+    # Casos por operador.
+    if not pdf_prod.empty:
+        pdf_casos_operador = pd.crosstab(
+            pdf_prod["_pdf_usuario"], pdf_prod["_caso"]
+        ).reindex(columns=casos, fill_value=0)
+        pdf_casos_operador["TOTAL"] = pdf_casos_operador.sum(axis=1)
+        pdf_casos_operador = (
+            pdf_casos_operador.sort_values("TOTAL", ascending=False)
+            .reset_index().rename(columns={"_pdf_usuario": "Confeccionada Por"})
+        )
+    else:
+        pdf_casos_operador = pd.DataFrame(columns=["Confeccionada Por"] + list(casos) + ["TOTAL"])
 
     # ---------------------------------------------------------
-    # Productividad y proyección calculadas para EL MISMO período
-    # que se está exportando (incluye períodos personalizados).
+    # 4. Ingreso de instalaciones pendientes para la proyección
     # ---------------------------------------------------------
-    _pdf_prod_all = df.copy()
-    _pdf_prod_all["_pdf_fecha"] = pd.to_datetime(_pdf_prod_all[col_fecha_medicion], errors="coerce", dayfirst=True)
-    _pdf_prod_all["_pdf_usuario"] = _pdf_prod_all[col_usuario].fillna("").astype(str).str.strip()
-    _pdf_prod_all["_pdf_estado"] = _pdf_prod_all[col_estado_prod].fillna("").astype(str).str.strip().str.upper()
-    _pdf_prod_all["_pdf_sucursal"] = _pdf_prod_all[col_sucursal_prod].fillna("").astype(str).str.strip().str.upper()
-    _pdf_prod_all = _pdf_prod_all[
-        _pdf_prod_all["_pdf_fecha"].notna()
-        & (_pdf_prod_all["_pdf_fecha"] >= _export_start.normalize())
-        & (_pdf_prod_all["_pdf_fecha"] < (_export_end.normalize() + pd.Timedelta(days=1)))
-        & (_pdf_prod_all["_pdf_sucursal"].isin([str(x).strip().upper() for x in sucursal]))
-        & (_pdf_prod_all["_caso"].isin(casos))
+    ingreso_inst = df[
+        (df["_sucursal"].isin(sucursal)) &
+        (df["_fecha"].notna()) &
+        (df["_fecha"] >= pdf_desde) &
+        (df["_fecha"] < pdf_end_exclusive) &
+        (df["_caso"] == "INSTALACION") &
+        (df["_estado"].isin(PENDIENTES))
     ].copy()
-    _pdf_prod = _pdf_prod_all[
-        (_pdf_prod_all["_pdf_estado"] == "CERRADA")
-        & _pdf_prod_all["_pdf_usuario"].ne("")
-        & _pdf_prod_all["_pdf_usuario"].str.upper().ne("NAN")
-        & _pdf_prod_all["_pdf_usuario"].str.upper().ne("NONE")
-    ].copy()
-    _pdf_prod["_pdf_dia"] = _pdf_prod["_pdf_fecha"].dt.normalize()
+    ingreso_inst_dia = (
+        ingreso_inst.groupby(ingreso_inst["_fecha"].dt.normalize()).size()
+        if not ingreso_inst.empty else pd.Series(dtype=float)
+    )
+    ingreso_prom_calendario = safe_div(len(ingreso_inst), periodo_dias)
+    ingreso_dias_con_pedidos = int((ingreso_inst_dia > 0).sum())
+    ingreso_prom_dias_con_pedidos = safe_div(len(ingreso_inst), ingreso_dias_con_pedidos)
 
-    _pdf_totales_usuario = _pdf_prod_all.groupby("_pdf_usuario").size().reset_index(name="Total Órdenes") if not _pdf_prod_all.empty else pd.DataFrame(columns=["_pdf_usuario", "Total Órdenes"])
-    _pdf_cerradas_usuario = _pdf_prod.groupby("_pdf_usuario").size().reset_index(name="Órdenes Cerradas") if not _pdf_prod.empty else pd.DataFrame(columns=["_pdf_usuario", "Órdenes Cerradas"])
-    _pdf_prod_data = _pdf_totales_usuario.merge(_pdf_cerradas_usuario, on="_pdf_usuario", how="left")
-    if not _pdf_prod_data.empty:
-        _pdf_prod_data["Órdenes Cerradas"] = _pdf_prod_data["Órdenes Cerradas"].fillna(0).astype(int)
-        _pdf_prod_data["Efectividad Cierre (%)"] = (_pdf_prod_data["Órdenes Cerradas"].div(_pdf_prod_data["Total Órdenes"].replace(0, pd.NA)).fillna(0).mul(100).round(1))
-        _pdf_prod_data = _pdf_prod_data.rename(columns={"_pdf_usuario": "Confeccionada Por"}).sort_values("Órdenes Cerradas", ascending=False)
-    else:
-        _pdf_prod_data = pd.DataFrame(columns=["Confeccionada Por", "Total Órdenes", "Órdenes Cerradas", "Efectividad Cierre (%)"])
+    # ---------------------------------------------------------
+    # 5. Proyección y escenarios
+    # ---------------------------------------------------------
+    q_pdf = int(q) if "q" in globals() else 5
+    prod_pdf = int(prod) if "prod" in globals() else 5
+    dias_trabajo_pdf = int(dias_trabajo_semana) if "dias_trabajo_semana" in globals() else 6
+    capacidad_pdf = q_pdf * prod_pdf
+    saldo_pdf = capacidad_pdf - ingreso_prom_calendario
+    max_dias_pdf = int(max_dias) if "max_dias" in globals() else 180
 
-    _pdf_rango_dias = pd.date_range(_export_start.normalize(), _export_end.normalize(), freq="D")
-    _pdf_conteos_dia = _pdf_prod.groupby("_pdf_dia").size() if not _pdf_prod.empty else pd.Series(dtype=float)
-    _pdf_diario = pd.DataFrame({"Fecha": _pdf_rango_dias})
-    _pdf_diario["Órdenes Cerradas"] = _pdf_diario["Fecha"].map(_pdf_conteos_dia).fillna(0).astype(int)
-
-    if not _pdf_prod.empty:
-        _pdf_casos_operador = pd.crosstab(_pdf_prod["_pdf_usuario"], _pdf_prod["_caso"]).reindex(columns=casos, fill_value=0)
-        _pdf_casos_operador["TOTAL"] = _pdf_casos_operador.sum(axis=1)
-        _pdf_casos_operador = _pdf_casos_operador.sort_values("TOTAL", ascending=False).reset_index().rename(columns={"_pdf_usuario": "Confeccionada Por"})
-        _pdf_detalle_odc = (_pdf_prod.groupby(["_pdf_usuario", "_pdf_dia", "_caso"]).size().reset_index(name="OS Cerradas").rename(columns={"_pdf_usuario": "Confeccionada Por", "_pdf_dia": "Fecha", "_caso": "Caso asociado"}).sort_values(["Fecha", "Confeccionada Por", "Caso asociado"]))
-    else:
-        _pdf_casos_operador = pd.DataFrame(columns=["Confeccionada Por"] + casos + ["TOTAL"])
-        _pdf_detalle_odc = pd.DataFrame(columns=["Confeccionada Por", "Fecha", "Caso asociado", "OS Cerradas"])
-
-    # Proyección: backlog del período + promedio automático de instalaciones pendientes.
-    _pdf_ingreso_inst = df[
-        (df["_sucursal"].isin(sucursal)) & (df["_fecha"].notna())
-        & (df["_fecha"] >= _export_start.normalize())
-        & (df["_fecha"] < (_export_end.normalize() + pd.Timedelta(days=1)))
-        & (df["_caso"] == "INSTALACION") & (df["_estado"].isin(PENDIENTES))
-    ]
-    _pdf_dias_periodo = (_export_end.date() - _export_start.date()).days + 1
-    _pdf_ingreso_prom = safe_div(len(_pdf_ingreso_inst), _pdf_dias_periodo)
-    _pdf_q = int(q) if "q" in globals() else 5
-    _pdf_prod_dia = int(prod) if "prod" in globals() else 5
-    _pdf_capacidad = _pdf_q * _pdf_prod_dia
-    _pdf_proj_rows = []
-    _pdf_backlog = float(len(pendientes))
-    _pdf_fecha = _export_end.date()
-    _pdf_max_dias = int(max_dias) if "max_dias" in globals() else 180
-    for _i in range(1, _pdf_max_dias + 1):
-        if _pdf_backlog <= 0:
+    proj_rows = []
+    backlog = float(total_pendientes)
+    fecha_proj = pdf_hasta.date()
+    for i in range(1, max_dias_pdf + 1):
+        if backlog <= 0:
             break
-        _inicio = _pdf_backlog
-        _realizadas = min(_pdf_capacidad, _pdf_backlog)
-        _pdf_backlog = max(0, _pdf_backlog - _realizadas + _pdf_ingreso_prom)
-        _pdf_fecha += timedelta(days=1)
-        _pdf_proj_rows.append({"Día": _i, "Fecha": _pdf_fecha, "Backlog inicio": round(_inicio,1), "Trabajos realizados": round(_realizadas,1), "Nuevas OS": round(_pdf_ingreso_prom,1), "Backlog final": round(_pdf_backlog,1)})
-    _pdf_proj = pd.DataFrame(_pdf_proj_rows)
+        inicio = backlog
+        realizadas_plan = min(capacidad_pdf, backlog)
+        backlog = max(0, backlog - realizadas_plan + ingreso_prom_calendario)
+        fecha_proj += timedelta(days=1)
+        proj_rows.append({
+            "Día": i,
+            "Fecha": fecha_proj,
+            "Backlog inicio": round(inicio, 1),
+            "Trabajos realizados": round(realizadas_plan, 1),
+            "Nuevas OS": round(ingreso_prom_calendario, 1),
+            "Backlog final": round(backlog, 1),
+        })
+    pdf_proj = pd.DataFrame(proj_rows)
 
-    pdf_buffer = io.BytesIO()
+    def fecha_suma_dias_laborables(fecha_inicio, dias, dias_semana=6):
+        """Suma días operativos lunes-sábado o lunes-viernes según parámetro."""
+        if dias <= 0:
+            return fecha_inicio
+        fecha = pd.Timestamp(fecha_inicio).normalize()
+        acumulados = 0
+        while acumulados < int(dias):
+            fecha += pd.Timedelta(days=1)
+            # 6 = lunes-sábado; 5 = lunes-viernes; cualquier otro usa días hábiles estándar.
+            es_laborable = fecha.weekday() < (6 if dias_semana >= 6 else 5)
+            if es_laborable:
+                acumulados += 1
+        return fecha.date()
 
-    # Paleta inspirada en el informe compartido.
+    def escenario(capacidad_dia):
+        neto = capacidad_dia - ingreso_prom_calendario
+        if neto <= 0:
+            return {"cap": capacidad_dia, "net": neto, "dias": None, "fecha": None}
+        dias = int(__import__("math").ceil(total_pendientes / neto)) if total_pendientes else 0
+        fecha = fecha_suma_dias_laborables(pdf_hasta.date(), dias, dias_trabajo_pdf)
+        return {"cap": capacidad_dia, "net": neto, "dias": dias, "fecha": fecha}
+
+    escenarios_pdf = [escenario(x) for x in [15.8, 18, 20, 22, 25]]
+
+    # ---------------------------------------------------------
+    # 6. Antigüedad
+    # ---------------------------------------------------------
+    edad_prom = pdf_pendientes["antiguedad"].mean() if not pdf_pendientes.empty else 0
+    edad_mediana = pdf_pendientes["antiguedad"].median() if not pdf_pendientes.empty else 0
+    edad_max = pdf_pendientes["antiguedad"].max() if not pdf_pendientes.empty else 0
+    pendientes_10 = int((pdf_pendientes["antiguedad"] >= 10).sum()) if not pdf_pendientes.empty else 0
+    pendientes_30 = int((pdf_pendientes["antiguedad"] > 30).sum()) if not pdf_pendientes.empty else 0
+
+    # ---------------------------------------------------------
+    # 7. Estilos y utilidades PDF
+    # ---------------------------------------------------------
     azul = colors.HexColor("#1F4E79")
     azul_claro = colors.HexColor("#D9EAF7")
     gris = colors.HexColor("#666666")
     gris_claro = colors.HexColor("#F2F2F2")
     negro = colors.HexColor("#111111")
     blanco = colors.white
+    verde = colors.HexColor("#548235")
+    rojo = colors.HexColor("#C00000")
 
+    pdf_buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         pdf_buffer,
         pagesize=A4,
-        rightMargin=1.45*cm,
-        leftMargin=1.45*cm,
-        topMargin=1.35*cm,
-        bottomMargin=1.35*cm,
-        title="Análisis y gestión de Órdenes de Servicio",
+        rightMargin=1.45 * cm,
+        leftMargin=1.45 * cm,
+        topMargin=1.35 * cm,
+        bottomMargin=1.35 * cm,
+        title="Análisis y Gestión de Órdenes de Servicio",
         author="Gestión de Órdenes de Servicio",
     )
 
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(
-        name="TituloInforme",
-        parent=styles["Title"],
-        fontName="Helvetica-Bold",
-        fontSize=18,
-        leading=22,
-        alignment=TA_CENTER,
-        textColor=negro,
-        spaceAfter=8,
+        name="TituloInforme", parent=styles["Title"], fontName="Helvetica-Bold",
+        fontSize=18, leading=22, alignment=TA_CENTER, textColor=negro, spaceAfter=8
     ))
     styles.add(ParagraphStyle(
-        name="SubtituloInforme",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=10.5,
-        leading=14,
-        alignment=TA_CENTER,
-        textColor=negro,
-        spaceAfter=7,
+        name="SubtituloInforme", parent=styles["Normal"], fontName="Helvetica",
+        fontSize=10.5, leading=14, alignment=TA_CENTER, textColor=negro, spaceAfter=7
     ))
     styles.add(ParagraphStyle(
-        name="FechaInforme",
-        parent=styles["Normal"],
-        fontName="Helvetica-Oblique",
-        fontSize=9.5,
-        leading=12,
-        alignment=TA_CENTER,
-        textColor=gris,
-        spaceAfter=16,
+        name="FechaInforme", parent=styles["Normal"], fontName="Helvetica-Oblique",
+        fontSize=9.5, leading=12, alignment=TA_CENTER, textColor=gris, spaceAfter=16
     ))
     styles.add(ParagraphStyle(
-        name="SeccionInforme",
-        parent=styles["Heading2"],
-        fontName="Helvetica-Bold",
-        fontSize=13,
-        leading=16,
-        textColor=azul,
-        spaceBefore=5,
-        spaceAfter=7,
+        name="SeccionInforme", parent=styles["Heading2"], fontName="Helvetica-Bold",
+        fontSize=13, leading=16, textColor=azul, spaceBefore=5, spaceAfter=7
     ))
     styles.add(ParagraphStyle(
-        name="SubseccionInforme",
-        parent=styles["Heading3"],
-        fontName="Helvetica-Bold",
-        fontSize=10.5,
-        leading=13,
-        textColor=azul,
-        spaceBefore=5,
-        spaceAfter=5,
+        name="SubseccionInforme", parent=styles["Heading3"], fontName="Helvetica-Bold",
+        fontSize=10.5, leading=13, textColor=azul, spaceBefore=5, spaceAfter=5
     ))
     styles.add(ParagraphStyle(
-        name="TextoInforme",
-        parent=styles["BodyText"],
-        fontName="Helvetica",
-        fontSize=9.2,
-        leading=13,
-        textColor=negro,
-        spaceAfter=7,
+        name="TextoInforme", parent=styles["BodyText"], fontName="Helvetica",
+        fontSize=9.2, leading=13, textColor=negro, spaceAfter=7
     ))
     styles.add(ParagraphStyle(
-        name="TextoNegrita",
-        parent=styles["BodyText"],
-        fontName="Helvetica-Bold",
-        fontSize=9.2,
-        leading=13,
-        textColor=negro,
-        spaceAfter=7,
+        name="TextoNegrita", parent=styles["BodyText"], fontName="Helvetica-Bold",
+        fontSize=9.2, leading=13, textColor=negro, spaceAfter=7
     ))
     styles.add(ParagraphStyle(
-        name="PieInforme",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=7.5,
-        leading=9,
-        textColor=gris,
+        name="PieInforme", parent=styles["Normal"], fontName="Helvetica",
+        fontSize=7.5, leading=9, textColor=gris
     ))
 
     def P(text, style="TextoInforme"):
@@ -1322,360 +1387,414 @@ def generar_pdf_informe(export_desde=None, export_hasta=None):
         except Exception:
             return str(n)
 
-    def table_pdf(data, widths=None, header=True, font_size=7.5):
-        # Convertimos todo a Paragraph para que las tablas largas no se desborden.
+    def table_pdf(data, widths=None, font_size=7.5, header=True):
+        if not data:
+            return Table([[""]])
         converted = []
         for r, row in enumerate(data):
-            converted.append([
-                Paragraph(str(v), ParagraphStyle(
-                    name=f"cell_{r}_{i}",
-                    fontName="Helvetica-Bold" if (header and r == 0) else "Helvetica",
-                    fontSize=font_size,
-                    leading=font_size + 2,
-                    textColor=blanco if (header and r == 0) else negro,
+            cells = []
+            for i, v in enumerate(row):
+                txt = "" if pd.isna(v) else str(v)
+                cells.append(Paragraph(
+                    txt,
+                    ParagraphStyle(
+                        name=f"celda_{id(data)}_{r}_{i}",
+                        fontName="Helvetica-Bold" if header and r == 0 else "Helvetica",
+                        fontSize=font_size,
+                        leading=font_size + 2,
+                        textColor=blanco if header and r == 0 else negro,
+                    )
                 ))
-                for i, v in enumerate(row)
-            ])
+            converted.append(cells)
         t = Table(converted, colWidths=widths, repeatRows=1 if header else 0, hAlign="LEFT")
         commands = [
-            ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#888888")),
-            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-            ("LEFTPADDING", (0,0), (-1,-1), 4),
-            ("RIGHTPADDING", (0,0), (-1,-1), 4),
-            ("TOPPADDING", (0,0), (-1,-1), 3),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#888888")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
         ]
         if header:
-            commands += [
-                ("BACKGROUND", (0,0), (-1,0), azul),
-                ("TEXTCOLOR", (0,0), (-1,0), blanco),
-            ]
+            commands += [("BACKGROUND", (0, 0), (-1, 0), azul), ("TEXTCOLOR", (0, 0), (-1, 0), blanco)]
             if len(converted) > 1:
-                commands.append(("ROWBACKGROUNDS", (0,1), (-1,-1), [blanco, gris_claro]))
+                commands.append(("ROWBACKGROUNDS", (0, 1), (-1, -1), [blanco, gris_claro]))
         t.setStyle(TableStyle(commands))
         return t
 
-    def grafico_barras_simple(labels, valores, titulo, ancho=17*cm, alto=7*cm):
-        """Gráfico de barras compacto, con estética similar al informe de referencia."""
+    def grafico_barras(labels, valores, titulo, ancho=17 * cm, alto=7 * cm):
         d = Drawing(ancho, alto)
         chart = VerticalBarChart()
-        chart.x = 38
+        chart.x = 42
         chart.y = 28
-        chart.width = ancho - 55
-        chart.height = alto - 48
-        chart.data = [list(map(float, valores))]
-        chart.categoryAxis.categoryNames = [str(x)[:18] for x in labels]
+        chart.width = ancho - 58
+        chart.height = alto - 50
+        vals = [float(x) for x in valores]
+        chart.data = [vals]
+        chart.categoryAxis.categoryNames = [str(x)[:20] for x in labels]
         chart.valueAxis.valueMin = 0
-        max_val = max([float(x) for x in valores], default=1)
+        max_val = max(vals, default=1)
         chart.valueAxis.valueMax = max(1, max_val * 1.18)
         chart.valueAxis.valueStep = max(1, round(chart.valueAxis.valueMax / 5))
         chart.bars[0].fillColor = azul
         chart.bars[0].strokeColor = azul
         chart.categoryAxis.labels.fontName = "Helvetica"
-        chart.categoryAxis.labels.fontSize = 6.5
+        chart.categoryAxis.labels.fontSize = 6.3
         chart.categoryAxis.labels.angle = 35
         chart.valueAxis.labels.fontName = "Helvetica"
         chart.valueAxis.labels.fontSize = 7
         chart.valueAxis.strokeColor = colors.HexColor("#999999")
         chart.categoryAxis.strokeColor = colors.HexColor("#999999")
         d.add(chart)
-        d.add(Paragraph(str(titulo), ParagraphStyle(
-            name="GraficoTitulo",
-            fontName="Helvetica",
-            fontSize=9,
-            leading=11,
-            alignment=TA_CENTER,
-            textColor=negro,
-        )))
+        d.add(String(ancho / 2, 8, str(titulo), fontName="Helvetica",
+                      fontSize=9, fillColor=negro, textAnchor="middle"))
+        return d
+
+    def grafico_linea(fechas, valores, titulo, ancho=17 * cm, alto=7 * cm):
+        d = Drawing(ancho, alto)
+        chart = HorizontalLineChart()
+        chart.x = 42
+        chart.y = 28
+        chart.width = ancho - 58
+        chart.height = alto - 50
+        vals = [float(x) for x in valores]
+        chart.data = [vals]
+        chart.categoryAxis.categoryNames = [pd.Timestamp(x).strftime("%d/%m") for x in fechas]
+        chart.categoryAxis.labels.fontName = "Helvetica"
+        chart.categoryAxis.labels.fontSize = 5.8
+        chart.categoryAxis.labels.angle = 45
+        chart.valueAxis.labels.fontName = "Helvetica"
+        chart.valueAxis.labels.fontSize = 7
+        chart.valueAxis.valueMin = 0
+        chart.valueAxis.valueMax = max(1, max(vals, default=1) * 1.15)
+        chart.lines[0].strokeColor = azul
+        chart.lines[0].strokeWidth = 1.8
+        d.add(chart)
+        d.add(String(ancho / 2, 8, str(titulo), fontName="Helvetica",
+                      fontSize=9, fillColor=negro, textAnchor="middle"))
         return d
 
     def pie_pagina(canvas, doc_obj):
         canvas.saveState()
         canvas.setStrokeColor(colors.HexColor("#D0D0D0"))
-        canvas.line(doc_obj.leftMargin, 0.95*cm, A4[0]-doc_obj.rightMargin, 0.95*cm)
+        canvas.line(doc_obj.leftMargin, 0.95 * cm, A4[0] - doc_obj.rightMargin, 0.95 * cm)
         canvas.setFont("Helvetica", 7)
         canvas.setFillColor(gris)
-        canvas.drawString(doc_obj.leftMargin, 0.58*cm, "Gestión de Órdenes de Servicio")
-        canvas.drawRightString(A4[0]-doc_obj.rightMargin, 0.58*cm, f"Página {doc_obj.page}")
+        canvas.drawString(doc_obj.leftMargin, 0.58 * cm, "Gestión de Órdenes de Servicio")
+        canvas.drawRightString(A4[0] - doc_obj.rightMargin, 0.58 * cm, f"Página {doc_obj.page}")
         canvas.restoreState()
 
-    suc_txt = ", ".join(sucursal) if sucursal else "Todas"
-    periodo_txt = f"{_export_start.strftime('%d/%m/%Y')} al {_export_end.strftime('%d/%m/%Y')}"
-    fecha_generacion = date.today().strftime("%d/%m/%Y")
-
-    total_base = len(base)
-    total_realizados = len(realizados)
-    total_pendientes = len(pendientes)
-    total_anulados = len(anulados)
-    total_otros = len(otros)
-
-    edad_prom = pendientes["antiguedad"].mean() if not pendientes.empty else 0
-    edad_mediana = pendientes["antiguedad"].median() if not pendientes.empty else 0
-    edad_max = pendientes["antiguedad"].max() if not pendientes.empty else 0
-    pendientes_10 = int((pendientes["antiguedad"] >= 10).sum()) if not pendientes.empty else 0
-
-    # Entradas diarias del período general.
-    entradas_diarias = (
-        entradas_periodo.groupby(entradas_periodo["_fecha"].dt.normalize()).size()
-        if not entradas_periodo.empty else pd.Series(dtype=float)
-    )
-    ingreso_prom = float(entradas_diarias.mean()) if not entradas_diarias.empty else 0
-
-    # Productividad del período realmente exportado.
-    prod_cierres = int(len(_pdf_prod))
-    prod_dias = (_export_end.date() - _export_start.date()).days + 1
-    prod_prom_dia = safe_div(prod_cierres, prod_dias)
-    ingreso_instalaciones_pendientes_pdf = float(_pdf_ingreso_prom)
-    capacidad_actual = _pdf_capacidad
-    saldo_actual = _pdf_capacidad - _pdf_ingreso_prom
-
-    story = []
-
-    story += [
+    # ---------------------------------------------------------
+    # Construcción del informe - ORDEN SOLICITADO
+    # ---------------------------------------------------------
+    story = [
         P("ANÁLISIS Y GESTIÓN DE ÓRDENES DE SERVICIO", "TituloInforme"),
-        P("Situación actual, productividad y proyección operativa", "SubtituloInforme"),
-        P(f"Información analizada al {fecha_generacion} | Período: {periodo_txt} | Sucursal: {suc_txt}", "FechaInforme"),
-        P("1. Resumen ejecutivo", "SeccionInforme"),
+        P(
+            f"Informe de productividad y gestión operativa | Período: {periodo_txt} | Sucursal/es: {suc_txt}",
+            "SubtituloInforme"
+        ),
+        P(f"Generado el {fecha_generacion}", "FechaInforme"),
     ]
 
+    # 1. Productividad por personal
+    story.append(P("1. Productividad por personal", "SeccionInforme"))
     story.append(P(
-        f"<b>Situación actual.</b> El período seleccionado contiene <b>{moneyless(total_base)}</b> órdenes "
-        f"de servicio de los casos seleccionados. Al cierre del período hay <b>{moneyless(total_pendientes)}</b> "
-        f"órdenes pendientes, <b>{moneyless(total_realizados)}</b> realizadas, <b>{moneyless(total_anulados)}</b> anuladas "
-        f"y <b>{moneyless(total_otros)}</b> en otros estados."
+        f"El análisis comprende el período <b>{periodo_txt}</b>. La productividad se calcula "
+        f"utilizando <b>{col_fecha_medicion}</b>, considerando únicamente órdenes en estado "
+        f"<b>CERRADA</b>, las sucursales seleccionadas y los casos seleccionados."
     ))
     story.append(P(
-        f"<b>Antigüedad.</b> Entre las órdenes pendientes, la antigüedad promedio es de "
-        f"<b>{edad_prom:.1f} días</b>, la mediana es de <b>{edad_mediana:.0f} días</b> y la máxima es de "
-        f"<b>{edad_max:.0f} días</b>. Hay <b>{moneyless(pendientes_10)}</b> órdenes con 10 días o más."
+        f"Durante el período se registraron <b>{moneyless(prod_cierres)}</b> OS cerradas, "
+        f"con un promedio de <b>{prod_prom_calendario:.1f} OS por día calendario</b> y "
+        f"<b>{prod_prom_produccion:.1f} OS por día efectivo de producción</b>."
     ))
-    story.append(P(
-        f"<b>Productividad.</b> Para el período exportado se registraron "
-        f"<b>{moneyless(prod_cierres)}</b> cierres, con un promedio de <b>{prod_prom_dia:.1f} cierres/día</b>. "
-        f"La medición utiliza la fecha de calendario y el estado CERRADA, respetando sucursal/es y casos seleccionados."
-    ))
-    if capacidad_actual is not None:
-        story.append(P(
-            f"<b>Proyección.</b> Con {q} cuadrillas a {prod} trabajos por cuadrilla/día y "
-            f"{ingreso_instalaciones_pendientes_pdf:.1f} nuevas OS/día (promedio histórico automático), "
-            f"la capacidad calculada es de <b>{moneyless(capacidad_actual)}</b> trabajos/día "
-            f"y el saldo neto es de <b>{moneyless(saldo_actual)}</b> OS/día."
-        ))
-
-    story += [Spacer(1, 4), P("2. Indicadores principales", "SeccionInforme")]
-    indicadores = [
-        ["Indicador", "Resultado", "Interpretación", "Fuente"],
-        ["Órdenes del período", moneyless(total_base), "Cartera considerada", "Órdenes de servicio"],
-        ["Órdenes pendientes", moneyless(total_pendientes), "Situación al final del período", "Órdenes de servicio"],
-        ["Antigüedad promedio", f"{edad_prom:.1f} días", "Demora media de pendientes", "Cálculo"],
-        ["Pendientes con 10+ días", moneyless(pendientes_10), "Grupo prioritario", "Cálculo"],
-        ["Órdenes realizadas", moneyless(total_realizados), "Estado CERRADA", "Órdenes de servicio"],
-        ["Cierres productividad", moneyless(prod_cierres), "Período de productividad", "Fecha Calendario"],
-        ["Promedio cierres/día", f"{prod_prom_dia:.1f}", "Media del período elegido", "Cálculo"],
-        ["Ingreso diario instalaciones pendientes", f"{ingreso_instalaciones_pendientes_pdf:.1f}", "Promedio automático para proyección", "Fecha Creación + Estado"],
-    ]
-    story.append(table_pdf(indicadores, widths=[4.1*cm, 2.6*cm, 5.0*cm, 4.0*cm], font_size=7.1))
-
-    story += [Spacer(1, 9), P("3. Situación por caso asociado", "SeccionInforme")]
-    caso_rows = [["Caso asociado", "Realizado", "Falta hacer", "Anulado", "Otros", "Total"]]
-    if not tabla.empty:
-        for _, r in tabla.iterrows():
-            caso_rows.append([
-                r.get("Caso", ""),
-                moneyless(r.get("Realizado", 0)),
-                moneyless(r.get("Falta hacer", 0)),
-                moneyless(r.get("Anulado", 0)),
-                moneyless(r.get("Otro estado", 0)),
-                moneyless(r.get("Total", 0)),
-            ])
-    story.append(table_pdf(caso_rows, widths=[5.1*cm, 2.1*cm, 2.3*cm, 2.1*cm, 1.8*cm, 2.0*cm], font_size=7.2))
-
-    if not tabla.empty:
-        try:
-            caso_labels = tabla["Caso"].astype(str).tolist()
-            caso_vals = tabla["Realizado"].fillna(0).astype(float).tolist()
-            story += [Spacer(1, 8), grafico_barras_simple(caso_labels, caso_vals, "Órdenes realizadas por caso asociado")]
-        except Exception:
-            pass
-
-    story += [PageBreak(), P("4. Productividad por personal", "SeccionInforme")]
-    story.append(P(
-        f"Período de productividad: <b>{_export_start.strftime('%d/%m/%Y')}</b> al "
-        f"<b>{_export_end.strftime('%d/%m/%Y')}</b>. Sucursal/es: <b>{suc_txt}</b>. "
-        f"Fecha utilizada: <b>{col_fecha_medicion}</b>."
-    ))
-    if not _pdf_prod_data.empty:
-        rows_prod = [["Confeccionada Por", "Total Órdenes", "Órdenes Cerradas", "Efectividad Cierre (%)"]]
-        for _, r in _pdf_prod_data.iterrows():
+    if not pdf_prod_data.empty:
+        rows_prod = [["Confeccionada Por", "Total Órdenes", "OS Cerradas", "Efectividad"]]
+        for _, r in pdf_prod_data.iterrows():
             rows_prod.append([
-                r.get("Confeccionada Por", ""),
-                moneyless(r.get("Total Órdenes", 0)),
-                moneyless(r.get("Órdenes Cerradas", 0)),
-                f"{float(r.get('Efectividad Cierre (%)', 0)):.1f}",
+                r["Confeccionada Por"], moneyless(r["Total Órdenes"]),
+                moneyless(r["Órdenes Cerradas"]), f"{float(r['Efectividad Cierre (%)']):.1f}%"
             ])
-        story.append(table_pdf(rows_prod, widths=[6.4*cm, 3.0*cm, 3.2*cm, 4.0*cm], font_size=7.4))
-        try:
-            top_prod = _pdf_prod_data.head(12)
-            story += [Spacer(1, 8), grafico_barras_simple(
-                top_prod["Confeccionada Por"].astype(str).tolist(),
-                top_prod["Órdenes Cerradas"].astype(float).tolist(),
-                "Órdenes cerradas por operador"
-            )]
-        except Exception:
-            pass
+        story.append(table_pdf(rows_prod, widths=[6.0*cm, 3.0*cm, 3.0*cm, 4.0*cm], font_size=7.2))
+        top = pdf_prod_data.head(15)
+        story.append(Spacer(1, 7))
+        story.append(grafico_barras(
+            top["Confeccionada Por"].tolist(),
+            top["Órdenes Cerradas"].tolist(),
+            "OS cerradas por operador"
+        ))
     else:
-        story.append(P("No se encontraron datos de productividad para el período seleccionado."))
+        story.append(P("No se encontraron cierres con responsable en el período seleccionado."))
 
-    story += [Spacer(1, 10), P("5. Cierres por operador por día", "SeccionInforme")]
-    if not _pdf_prod.empty:
-        mat = pd.crosstab(_pdf_prod["_pdf_usuario"], _pdf_prod["_pdf_dia"]).reindex(columns=_pdf_rango_dias, fill_value=0)
+    # 2. Cierres por operador por día
+    story.append(P("2. Cierres por operador por día", "SeccionInforme"))
+    if not pdf_prod.empty:
+        mat = pd.crosstab(pdf_prod["_pdf_usuario"], pdf_prod["_pdf_dia"]).reindex(columns=rango_dias, fill_value=0)
         mat = mat.reset_index().rename(columns={"_pdf_usuario": "Confeccionada Por"})
         mat["TOTAL"] = mat.drop(columns=["Confeccionada Por"]).sum(axis=1)
-        # Limitar la matriz a un máximo razonable para el PDF; la app conserva todos los datos.
-        cols = list(mat.columns)
-        if len(cols) > 15:
-            cols = [cols[0]] + cols[1:15] + (["TOTAL"] if "TOTAL" in cols else [])
-            mat = mat[cols]
-        story.append(table_pdf([list(mat.columns)] + mat.astype(str).values.tolist(), font_size=6.2))
+        # Para períodos largos se muestran bloques de 15 días.
+        if len(rango_dias) <= 15:
+            rows = [["Confeccionada Por"] + [d.strftime("%d/%m") for d in rango_dias] + ["TOTAL"]]
+            for _, r in mat.iterrows():
+                rows.append([r["Confeccionada Por"]] + [moneyless(r[d]) for d in rango_dias] + [moneyless(r["TOTAL"])])
+            story.append(table_pdf(rows, font_size=6.0))
+        else:
+            story.append(P("Para mantener la legibilidad, el período se divide en bloques de hasta 15 días."))
+            for ini in range(0, len(rango_dias), 15):
+                bloque = rango_dias[ini:ini+15]
+                r2 = [["Confeccionada Por"] + [d.strftime("%d/%m") for d in bloque] + ["TOTAL BLOQUE"]]
+                for _, r in mat.iterrows():
+                    r2.append([
+                        r["Confeccionada Por"],
+                        *[moneyless(r[d]) for d in bloque],
+                        moneyless(sum(r[d] for d in bloque))
+                    ])
+                story.append(Spacer(1, 5))
+                story.append(table_pdf(r2, font_size=5.8))
     else:
         story.append(P("No hay cierres para mostrar."))
 
-    story += [Spacer(1, 8), P("5.1 Detalle de cierres por operador, día y caso", "SeccionInforme")]
-
-    # En lugar de una única tabla con una fila por operador + fecha + caso,
-    # se genera una tabla INDIVIDUAL para cada operador. De esta manera el
-    # nombre del operador no se repite en cada fila y el informe resulta
-    # mucho más compacto y fácil de leer.
-    if not _pdf_prod.empty:
-        _casos_pdf_orden = list(casos)
-
-        _operadores_pdf = (
-            _pdf_prod["_pdf_usuario"]
-            .dropna()
-            .astype(str)
-            .str.strip()
-        )
-        _operadores_pdf = sorted(
-            [x for x in _operadores_pdf.unique() if x and x.upper() not in ("NAN", "NONE")],
-            key=str.lower
-        )
-
-        for _operador in _operadores_pdf:
-            _op = _pdf_prod[_pdf_prod["_pdf_usuario"].astype(str).str.strip() == _operador].copy()
-            if _op.empty:
-                continue
-
-            _op["_fecha_dia"] = _op["_pdf_dia"].dt.normalize()
-
-            _tabla_op = pd.crosstab(
-                _op["_fecha_dia"],
-                _op["_caso"]
-            ).reindex(columns=_casos_pdf_orden, fill_value=0)
-
-            # Solo mostramos los días en los que el operador tuvo al menos
-            # un cierre. Esto evita llenar el informe de filas con ceros.
-            _tabla_op = _tabla_op.loc[_tabla_op.sum(axis=1) > 0].copy()
-
-            if _tabla_op.empty:
-                continue
-
-            _tabla_op.insert(0, "Fecha", _tabla_op.index)
-            _tabla_op = _tabla_op.reset_index(drop=True)
-            _tabla_op["TOTAL"] = _tabla_op[_casos_pdf_orden].sum(axis=1)
-            _tabla_op["Fecha"] = pd.to_datetime(
-                _tabla_op["Fecha"], errors="coerce"
-            ).dt.strftime("%d/%m/%Y")
-
-            story.append(Spacer(1, 7))
-            story.append(P(f"Operador: <b>{_operador}</b>", "SubseccionInforme"))
-            story.append(
-                table_pdf(
-                    [list(_tabla_op.columns)] + _tabla_op.astype(str).values.tolist(),
-                    font_size=6.5
-                )
-            )
-    else:
-        story.append(P("No hay cierres para mostrar en el detalle por operador."))
-
-    story += [PageBreak(), P("6. Casos de trabajo cerrados por operador", "SeccionInforme")]
-    if not _pdf_casos_operador.empty:
-        rows_casos = [list(_pdf_casos_operador.columns)] + _pdf_casos_operador.astype(str).values.tolist()
-        story.append(table_pdf(rows_casos, font_size=6.8))
+    # 3. Casos de trabajo cerrados por operador
+    story.append(P("3. Casos de trabajo cerrados por operador", "SeccionInforme"))
+    if not pdf_casos_operador.empty:
+        rows_casos = [list(pdf_casos_operador.columns)] + [list(map(str, r)) for r in pdf_casos_operador.astype(str).values]
+        story.append(table_pdf(rows_casos, font_size=6.4))
+        totales_caso = [pdf_casos_operador[c].sum() for c in casos]
+        story.append(Spacer(1, 6))
+        story.append(grafico_barras(casos, totales_caso, "Distribución total de cierres por caso"))
     else:
         story.append(P("No hay casos de trabajo cerrados para el período seleccionado."))
 
-    story += [Spacer(1, 10), P("7. Productividad día por día", "SeccionInforme")]
-    if not _pdf_diario.empty:
-        diario_pdf = _pdf_diario.copy()
-        diario_pdf["Fecha"] = pd.to_datetime(diario_pdf["Fecha"], errors="coerce").dt.strftime("%d/%m/%Y")
-        story.append(table_pdf([list(diario_pdf.columns)] + diario_pdf.astype(str).values.tolist(), widths=[5*cm, 3.5*cm], font_size=7.2))
-    else:
-        story.append(P("No hay cierres para mostrar día por día."))
-
-    story += [PageBreak(), P("8. Proyección operativa", "SeccionInforme")]
+    # 4. Detalle individual de cierres por operador, día y caso
+    story.append(P("4. Detalle individual de cierres por operador, día y caso", "SeccionInforme"))
     story.append(P(
-        f"La proyección parte de <b>{moneyless(total_pendientes)}</b> OS pendientes al final del período. "
-        f"Los parámetros utilizados en la pestaña de proyección son editables desde la aplicación."
+        "Se presenta un cuadro independiente para cada operador. Cada cuadro contiene solamente "
+        "los días en los que registró cierres y desglosa la cantidad por caso, evitando repetir "
+        "innecesariamente el nombre del operador en cada fila."
     ))
-    if isinstance(_pdf_proj, pd.DataFrame) and not _pdf_proj.empty:
-        filas = [["Día", "Fecha", "Backlog inicio", "Trabajos realizados", "Nuevas OS", "Backlog final"]]
-        # Mostrar una muestra representativa si son demasiadas filas.
-        proj_pdf = _pdf_proj.copy()
-        if len(proj_pdf) > 30:
-            proj_pdf = pd.concat([proj_pdf.head(15), proj_pdf.tail(15)])
-        for _, r in proj_pdf.iterrows():
-            filas.append([
-                r.get("Día", ""),
-                pd.to_datetime(r.get("Fecha"), errors="coerce").strftime("%d/%m/%Y") if pd.notna(r.get("Fecha")) else "",
-                r.get("Backlog inicio", ""),
-                r.get("Trabajos realizados", ""),
-                r.get("Nuevas OS", ""),
-                r.get("Backlog final", ""),
-            ])
-        story.append(table_pdf(filas, widths=[1.2*cm, 3.0*cm, 3.0*cm, 3.1*cm, 2.5*cm, 3.0*cm], font_size=6.8))
-        fin = _pdf_proj.iloc[-1]
-        if float(fin.get("Backlog final", 1)) <= 0:
+    if not pdf_prod.empty:
+        operadores = sorted(
+            [x for x in pdf_prod["_pdf_usuario"].dropna().astype(str).str.strip().unique()
+             if x and x.upper() not in ("NAN", "NONE")],
+            key=str.lower
+        )
+        for operador in operadores:
+            op = pdf_prod[pdf_prod["_pdf_usuario"].astype(str).str.strip() == operador].copy()
+            tabla_op = pd.crosstab(op["_pdf_dia"], op["_caso"]).reindex(columns=casos, fill_value=0)
+            tabla_op = tabla_op.loc[tabla_op.sum(axis=1) > 0]
+            if tabla_op.empty:
+                continue
+            tabla_op.insert(0, "Fecha", tabla_op.index)
+            tabla_op = tabla_op.reset_index(drop=True)
+            tabla_op["TOTAL"] = tabla_op[casos].sum(axis=1)
+            tabla_op["Fecha"] = pd.to_datetime(tabla_op["Fecha"]).dt.strftime("%d/%m/%Y")
+            op_rows = [["Fecha"] + list(casos) + ["TOTAL"]]
+            for _, r in tabla_op.iterrows():
+                op_rows.append([r["Fecha"]] + [moneyless(r[c]) for c in casos] + [moneyless(r["TOTAL"])])
             story.append(Spacer(1, 6))
+            story.append(P(f"Operador: <b>{operador}</b>", "SubseccionInforme"))
+            story.append(table_pdf(op_rows, font_size=6.0))
+    else:
+        story.append(P("No hay cierres para el detalle individual."))
+
+    # 5. Productividad día por día
+    story.append(P("5. Productividad día por día", "SeccionInforme"))
+    story.append(P(
+        f"El comportamiento diario se analiza sobre los <b>{moneyless(periodo_dias)} días</b> "
+        f"comprendidos en el período seleccionado. Hubo <b>{moneyless(dias_con_produccion)}</b> días "
+        f"con al menos un cierre y <b>{moneyless(periodo_dias - dias_con_produccion)}</b> días sin cierres."
+    ))
+    diario_rows = [["Fecha", "OS Cerradas"]]
+    for _, r in pdf_diario.iterrows():
+        diario_rows.append([pd.Timestamp(r["Fecha"]).strftime("%d/%m/%Y"), moneyless(r["OS Cerradas"])])
+    story.append(table_pdf(diario_rows, widths=[6*cm, 4*cm], font_size=7.2))
+    story.append(Spacer(1, 7))
+    if not pdf_diario.empty:
+        story.append(grafico_linea(
+            pdf_diario["Fecha"].tolist(),
+            pdf_diario["OS Cerradas"].tolist(),
+            "Evolución diaria de cierres"
+        ))
+
+    # 6. Antigüedad de las instalaciones pendientes
+    story.append(P("6. Antigüedad de las instalaciones pendientes", "SeccionInforme"))
+    story.append(P(
+        f"Al cierre del período quedan <b>{moneyless(total_pendientes)}</b> OS pendientes. "
+        f"La antigüedad promedio es de <b>{edad_prom:.1f} días</b>, la mediana de "
+        f"<b>{edad_mediana:.0f} días</b> y la máxima de <b>{edad_max:.0f} días</b>. "
+        f"Hay <b>{moneyless(pendientes_10)}</b> OS con 10 días o más y "
+        f"<b>{moneyless(pendientes_30)}</b> con más de 30 días."
+    ))
+    cruz_pdf = pd.crosstab(pdf_pendientes["intervalo"], pdf_pendientes["_caso"]) if not pdf_pendientes.empty else pd.DataFrame()
+    cruz_pdf = cruz_pdf.reindex(INTERVALOS, fill_value=0)
+    for c in casos:
+        if c not in cruz_pdf.columns:
+            cruz_pdf[c] = 0
+    if not cruz_pdf.empty:
+        cruz_pdf = cruz_pdf[casos]
+        cruz_pdf["TOTAL"] = cruz_pdf.sum(axis=1)
+        cruz_total = cruz_pdf.sum(axis=0).to_frame().T
+        cruz_total.index = ["TOTAL"]
+        cruz_pdf_final = pd.concat([cruz_pdf, cruz_total])
+        edad_rows = [["Intervalo"] + list(casos) + ["TOTAL"]]
+        for idx, row in cruz_pdf_final.iterrows():
+            edad_rows.append([idx] + [moneyless(row.get(c, 0)) for c in casos] + [moneyless(row.get("TOTAL", 0))])
+        story.append(table_pdf(edad_rows, font_size=6.2))
+
+    # 7. Capacidad de las cuadrillas
+    story.append(P("7. Capacidad de las cuadrillas", "SeccionInforme"))
+    story.append(P(
+        f"El escenario operativo utiliza <b>{q_pdf} cuadrillas</b> y una referencia de "
+        f"<b>{prod_pdf} trabajos por cuadrilla/día</b>, equivalente a una capacidad teórica "
+        f"de <b>{capacidad_pdf} OS/día</b>. La producción observada fue de "
+        f"<b>{prod_prom_produccion:.1f} OS/día</b> en los días con actividad."
+    ))
+    story.append(P(
+        f"Con {q_pdf} cuadrillas, la referencia histórica equivale a aproximadamente "
+        f"<b>{safe_div(prod_prom_produccion, q_pdf):.1f} OS por cuadrilla/día</b>. "
+        "Esta cifra es una referencia agregada y no una asignación individual de cuadrillas."
+    ))
+
+    # 8. Ingreso de nuevas instalaciones
+    story.append(P("8. Ingreso de nuevas instalaciones", "SeccionInforme"))
+    story.append(P(
+        f"Durante el período ingresaron <b>{moneyless(len(ingreso_inst))}</b> OS de INSTALACION "
+        f"que quedaron en estado pendiente. El promedio de ingreso fue de "
+        f"<b>{ingreso_prom_calendario:.1f} OS/día calendario</b> y, considerando solamente los "
+        f"días con ingreso, de <b>{ingreso_prom_dias_con_pedidos:.1f} OS/día</b>."
+    ))
+    if not ingreso_inst_dia.empty:
+        story.append(P(
+            f"El máximo diario observado fue de <b>{moneyless(int(ingreso_inst_dia.max()))} OS</b> "
+            f"y la mediana de los días con ingreso fue de <b>{float(ingreso_inst_dia.median()):.1f} OS/día</b>."
+        ))
+
+    # 9. Escenarios de recuperación
+    story.append(P("9. Escenarios de recuperación", "SeccionInforme"))
+    escenarios_rows = [["Escenario", "Capacidad/día", "Reducción neta/día", "Días operativos", "Fecha estimada"]]
+    nombres_esc = [
+        "Capacidad 15,8/día", "18 instalaciones/día", "20 instalaciones/día",
+        "22 instalaciones/día", "25 instalaciones/día"
+    ]
+    for nombre, esc in zip(nombres_esc, escenarios_pdf):
+        escenarios_rows.append([
+            nombre, f"{esc['cap']:.1f}", f"{esc['net']:.1f}",
+            str(esc["dias"]) if esc["dias"] is not None else "No se reduce",
+            esc["fecha"].strftime("%d/%m/%Y") if esc["fecha"] else "—"
+        ])
+    story.append(table_pdf(
+        escenarios_rows,
+        widths=[4.2*cm, 2.8*cm, 3.3*cm, 3.0*cm, 3.2*cm],
+        font_size=7.0
+    ))
+    story.append(P(
+        "Los escenarios son referencias de gestión. Su resultado depende de sostener la capacidad "
+        "y el nivel de ingreso promedio; no constituyen una fecha comprometida."
+    ))
+
+    # 10. Plan operativo recomendado
+    story.append(P("10. Plan operativo recomendado", "SeccionInforme"))
+    plan = [
+        "Sostener una producción diaria superior al ingreso promedio de nuevas instalaciones.",
+        "Priorizar las OS de mayor antigüedad y aplicar FIFO dentro de cada zona o recorrido.",
+        "Controlar diariamente ingreso, cierres, pendientes y antigüedad máxima.",
+        "Comparar semanalmente capacidad efectiva contra ingreso real y corregir desvíos.",
+        f"Reducir la cartera actual de {moneyless(total_pendientes)} OS hacia una zona de seguridad que permita absorber variaciones de demanda.",
+        "Una vez recuperado el plazo, mantener capacidad de reserva para picos de ingreso."
+    ]
+    for item in plan:
+        story.append(P("• " + item))
+
+    # 11. Proyección operativa (SIN GRÁFICO)
+    story.append(P("11. Proyección operativa", "SeccionInforme"))
+    story.append(P(
+        f"La proyección parte de <b>{moneyless(total_pendientes)} OS pendientes</b> al cierre del "
+        f"período y utiliza un ingreso automático de <b>{ingreso_prom_calendario:.1f} instalaciones "
+        f"pendientes/día</b>, calculado exclusivamente con el período seleccionado."
+    ))
+    story.append(P(
+        f"Escenario configurado: <b>{q_pdf} cuadrillas × {prod_pdf} trabajos/cuadrilla/día = "
+        f"{capacidad_pdf} OS/día</b>. Reducción neta estimada: <b>{max(saldo_pdf, 0):.1f} OS/día</b>."
+    ))
+    if not pdf_proj.empty:
+        fin = pdf_proj.iloc[-1]
+        if float(fin["Backlog final"]) <= 0:
             story.append(P(
-                f"<b>Conclusión:</b> el backlog llega a cero el <b>{pd.to_datetime(fin['Fecha']).strftime('%d/%m/%Y')}</b>.",
-                "TextoNegrita"
+                f"<b>Resultado:</b> bajo este escenario el backlog llega a cero aproximadamente el "
+                f"<b>{pd.Timestamp(fin['Fecha']).strftime('%d/%m/%Y')}</b>."
             ))
         else:
             story.append(P(
-                f"<b>Conclusión:</b> después de {int(fin.get('Día', 0))} días quedan aproximadamente "
-                f"<b>{moneyless(fin.get('Backlog final', 0))} OS</b>.", "TextoNegrita"
+                f"<b>Resultado:</b> después de <b>{moneyless(fin['Día'])} días</b> proyectados "
+                f"quedarían aproximadamente <b>{moneyless(fin['Backlog final'])} OS</b>."
             ))
+        # Tabla resumida, sin gráfico.
+        proj_rows = [["Día", "Fecha", "Backlog inicio", "Trabajos realizados", "Nuevas OS", "Backlog final"]]
+        muestra = pdf_proj if len(pdf_proj) <= 30 else pd.concat([pdf_proj.head(15), pdf_proj.tail(15)])
+        for _, r in muestra.iterrows():
+            proj_rows.append([
+                moneyless(r["Día"]), pd.Timestamp(r["Fecha"]).strftime("%d/%m/%Y"),
+                r["Backlog inicio"], r["Trabajos realizados"], r["Nuevas OS"], r["Backlog final"]
+            ])
+        story.append(table_pdf(
+            proj_rows,
+            widths=[1.2*cm, 3.0*cm, 3.0*cm, 3.1*cm, 2.5*cm, 3.0*cm],
+            font_size=6.2
+        ))
     else:
-        story.append(P("No hay una proyección calculada para los parámetros actuales."))
+        story.append(P(
+            "No existe reducción sostenible con los parámetros configurados o no existe backlog pendiente."
+        ))
 
-    story += [Spacer(1, 12), P("9. Observaciones y oportunidades de mejora", "SeccionInforme")]
-    _obs_pdf = []
-    if total_base:
-        _pct_pend = safe_div(total_pendientes, total_base) * 100
-        _obs_pdf.append(f"La cartera contiene {moneyless(total_base)} OS y finaliza con {moneyless(total_pendientes)} pendientes ({_pct_pend:.1f}%).")
-    _mayores_30 = int((pendientes["antiguedad"] > 30).sum()) if not pendientes.empty else 0
-    if _mayores_30:
-        _obs_pdf.append(f"Hay {moneyless(_mayores_30)} OS con más de 30 días; deben tratarse como cartera crítica.")
-    if ingreso_instalaciones_pendientes_pdf > prod_prom_dia and prod_prom_dia > 0:
-        _obs_pdf.append("El ingreso promedio de instalaciones pendientes supera el promedio de cierres; sin una mejora de capacidad, el backlog tenderá a crecer.")
-    if prod_cierres == 0:
-        _obs_pdf.append("No se registran cierres en el período; corresponde revisar fecha de calendario, estados y asignación de responsables.")
-    if not _obs_pdf:
-        _obs_pdf.append("No se detectaron alertas críticas con los indicadores disponibles. Mantener seguimiento periódico.")
-    for _texto in _obs_pdf:
-        story.append(P("• " + _texto))
+    # 12. Observaciones y oportunidades de mejora
+    story.append(P("12. Observaciones y oportunidades de mejora", "SeccionInforme"))
+    observaciones = []
+    if total_pendientes:
+        observaciones.append(
+            f"La cartera termina con {moneyless(total_pendientes)} OS pendientes, equivalente al {pct_pend:.1f}% de las OS analizadas."
+        )
+    if pendientes_10:
+        observaciones.append(
+            f"Existen {moneyless(pendientes_10)} OS con 10 días o más; deben tratarse como prioridad operativa."
+        )
+    if pendientes_30:
+        observaciones.append(
+            f"Hay {moneyless(pendientes_30)} OS con más de 30 días; se recomienda un plan específico de recuperación y seguimiento diario."
+        )
+    if ingreso_prom_calendario > prod_prom_calendario and prod_cierres > 0:
+        observaciones.append(
+            "El ingreso promedio de instalaciones pendientes supera la producción promedio diaria; si esta relación continúa, el backlog tenderá a crecer."
+        )
+    if prod_cierres and dias_con_produccion < periodo_dias:
+        observaciones.append(
+            f"Se detectaron {moneyless(periodo_dias - dias_con_produccion)} días sin cierres; conviene revisar disponibilidad, asignación, materiales, movilidad y causas de jornada sin producción."
+        )
+    if not pdf_prod_data.empty and len(pdf_prod_data) > 1:
+        top_cierre = int(pdf_prod_data.iloc[0]["Órdenes Cerradas"])
+        med_cierre = float(pdf_prod_data["Órdenes Cerradas"].median())
+        if top_cierre > med_cierre * 1.8 and med_cierre > 0:
+            observaciones.append(
+                "Existe dispersión importante en los cierres por operador; conviene revisar balance de carga, complejidad de casos y disponibilidad de trabajo."
+            )
+    if not observaciones:
+        observaciones.append("No se detectaron alertas críticas con los indicadores disponibles; mantener seguimiento periódico.")
+    for obs in observaciones:
+        story.append(P("• " + obs))
 
-    story += [Spacer(1, 8), P("10. Consideraciones y propuestas", "SeccionInforme")]
-    _propuestas_pdf = [
-        "Priorizar OS envejecidas y realizar seguimiento diario hasta su cierre.",
-        "Monitorear cierres por operador, día y caso para equilibrar cargas y detectar desvíos de producción.",
-        "Comparar capacidad efectiva de cuadrillas contra el promedio de ingreso diario de instalaciones pendientes.",
-        "Actualizar semanalmente la proyección con el comportamiento real de ingreso y cierres.",
-        "Revisar causas de jornadas de baja producción: disponibilidad, asignación, tiempos de traslado, retrabajos y restricciones operativas.",
-        "La proyección es un escenario de gestión y no incorpora automáticamente feriados, ausencias, zonas o diferencias de productividad entre cuadrillas."
+    # 13. Consideraciones y propuestas
+    story.append(P("13. Consideraciones y propuestas", "SeccionInforme"))
+    propuestas = [
+        "Mantener un control diario de ingreso, cierres y backlog.",
+        "Priorizar las OS antiguas y realizar seguimiento específico de las que superen los 10 días.",
+        "Utilizar la productividad por operador, día y caso para equilibrar cargas y detectar desvíos.",
+        "Revisar la distribución de casos para identificar dónde se concentra la demanda y dónde existen oportunidades de especialización.",
+        "Ajustar cuadrillas o productividad cuando la capacidad neta sea insuficiente para reducir la cartera.",
+        "Actualizar periódicamente la proyección utilizando el promedio real de ingreso de instalaciones pendientes.",
+        "Investigar y documentar jornadas de baja o nula producción para corregir causas repetitivas.",
+        "Una vez normalizada la antigüedad, conservar capacidad de reserva para absorber picos de demanda."
     ]
-    for _texto in _propuestas_pdf:
-        story.append(P("• " + _texto))
+    for prop in propuestas:
+        story.append(P("• " + prop))
 
     doc.build(story, onFirstPage=pie_pagina, onLaterPages=pie_pagina)
     pdf_buffer.seek(0)
