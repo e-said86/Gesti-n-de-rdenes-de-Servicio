@@ -1277,6 +1277,16 @@ def generar_pdf_informe(export_desde=None, export_hasta=None):
         spaceAfter=7,
     ))
     styles.add(ParagraphStyle(
+        name="SubseccionInforme",
+        parent=styles["Heading3"],
+        fontName="Helvetica-Bold",
+        fontSize=10.5,
+        leading=13,
+        textColor=azul,
+        spaceBefore=5,
+        spaceAfter=5,
+    ))
+    styles.add(ParagraphStyle(
         name="TextoInforme",
         parent=styles["BodyText"],
         fontName="Helvetica",
@@ -1531,12 +1541,61 @@ def generar_pdf_informe(export_desde=None, export_hasta=None):
         story.append(P("No hay cierres para mostrar."))
 
     story += [Spacer(1, 8), P("5.1 Detalle de cierres por operador, día y caso", "SeccionInforme")]
-    if not _pdf_detalle_odc.empty:
-        _det_pdf = _pdf_detalle_odc.copy()
-        _det_pdf["Fecha"] = pd.to_datetime(_det_pdf["Fecha"], errors="coerce").dt.strftime("%d/%m/%Y")
-        story.append(table_pdf([list(_det_pdf.columns)] + _det_pdf.astype(str).values.tolist(), font_size=6.3))
+
+    # En lugar de una única tabla con una fila por operador + fecha + caso,
+    # se genera una tabla INDIVIDUAL para cada operador. De esta manera el
+    # nombre del operador no se repite en cada fila y el informe resulta
+    # mucho más compacto y fácil de leer.
+    if not _pdf_prod.empty:
+        _casos_pdf_orden = list(casos)
+
+        _operadores_pdf = (
+            _pdf_prod["_pdf_usuario"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+        _operadores_pdf = sorted(
+            [x for x in _operadores_pdf.unique() if x and x.upper() not in ("NAN", "NONE")],
+            key=str.lower
+        )
+
+        for _operador in _operadores_pdf:
+            _op = _pdf_prod[_pdf_prod["_pdf_usuario"].astype(str).str.strip() == _operador].copy()
+            if _op.empty:
+                continue
+
+            _op["_fecha_dia"] = _op["_pdf_dia"].dt.normalize()
+
+            _tabla_op = pd.crosstab(
+                _op["_fecha_dia"],
+                _op["_caso"]
+            ).reindex(columns=_casos_pdf_orden, fill_value=0)
+
+            # Solo mostramos los días en los que el operador tuvo al menos
+            # un cierre. Esto evita llenar el informe de filas con ceros.
+            _tabla_op = _tabla_op.loc[_tabla_op.sum(axis=1) > 0].copy()
+
+            if _tabla_op.empty:
+                continue
+
+            _tabla_op.insert(0, "Fecha", _tabla_op.index)
+            _tabla_op = _tabla_op.reset_index(drop=True)
+            _tabla_op["TOTAL"] = _tabla_op[_casos_pdf_orden].sum(axis=1)
+            _tabla_op["Fecha"] = pd.to_datetime(
+                _tabla_op["Fecha"], errors="coerce"
+            ).dt.strftime("%d/%m/%Y")
+
+            story.append(Spacer(1, 7))
+            story.append(P(f"Operador: <b>{_operador}</b>", "SubseccionInforme"))
+            story.append(
+                table_pdf(
+                    [list(_tabla_op.columns)] + _tabla_op.astype(str).values.tolist(),
+                    font_size=6.5
+                )
+            )
     else:
-        story.append(P("No hay detalle operador/día/caso para el período exportado."))
+        story.append(P("No hay cierres para mostrar en el detalle por operador."))
 
     story += [PageBreak(), P("6. Casos de trabajo cerrados por operador", "SeccionInforme")]
     if not _pdf_casos_operador.empty:
