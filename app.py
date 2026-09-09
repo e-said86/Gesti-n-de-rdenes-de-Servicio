@@ -1078,10 +1078,11 @@ with tabs[5]:
 # ============================================================
 # GENERADOR DE PDF - INFORME EJECUTIVO
 # ============================================================
-def generar_pdf_informe():
-    """Genera un informe PDF dinámico con el mismo enfoque visual
-    del informe de planificación: título, resumen ejecutivo,
-    indicadores, tablas y gráficos simples."""
+def generar_pdf_informe(export_desde=None, export_hasta=None):
+    """Genera un informe PDF dinámico con el mismo enfoque visual.
+    Si se reciben export_desde/export_hasta, el informe usa ese período
+    independientemente del período general de la barra lateral.
+    """
     try:
         from reportlab.lib import colors
         from reportlab.lib.enums import TA_CENTER, TA_LEFT
@@ -1102,6 +1103,54 @@ def generar_pdf_informe():
             "Para generar PDF falta la librería reportlab. "
             "Instalala con: pip install reportlab"
         ) from e
+
+    # ---------------------------------------------------------
+    # Período específico de exportación
+    # ---------------------------------------------------------
+    if export_desde is not None and export_hasta is not None:
+        _export_start = pd.Timestamp(export_desde)
+        _export_end = pd.Timestamp(export_hasta)
+
+        # Recalculamos la base para que el PDF respete el período elegido
+        # en la pestaña Exportar y no el período de la barra lateral.
+        base = df[
+            (df["_sucursal"].isin(sucursal)) &
+            (df["_fecha"].notna()) &
+            (df["_fecha"] >= _export_start) &
+            (df["_fecha"] <= _export_end) &
+            (df["_caso"].isin(casos))
+        ].copy()
+
+        base["antiguedad"] = (_export_end - base["_fecha"]).dt.days
+        base["situacion"] = base["_estado"].apply(
+            lambda x:
+                "Realizado" if x in REALIZADO else
+                "Falta hacer" if x in PENDIENTES else
+                "Anulado" if x in ANULADO else
+                "Otro estado"
+        )
+
+        realizados = base[base["situacion"] == "Realizado"].copy()
+        pendientes = base[base["situacion"] == "Falta hacer"].copy()
+        anulados = base[base["situacion"] == "Anulado"].copy()
+        otros = base[base["situacion"] == "Otro estado"].copy()
+        pendientes["intervalo"] = pendientes["antiguedad"].apply(age_bucket)
+
+        entradas_periodo = base[
+            (base["_fecha"] >= _export_start) &
+            (base["_fecha"] <= _export_end)
+        ].copy()
+
+        tabla = pd.crosstab(base["_caso"], base["situacion"])
+        for _estado in ["Realizado", "Falta hacer", "Anulado", "Otro estado"]:
+            if _estado not in tabla.columns:
+                tabla[_estado] = 0
+        tabla["Total"] = tabla.sum(axis=1)
+        tabla = tabla.reset_index().rename(columns={"_caso": "Caso"})
+        tabla = tabla[["Caso", "Realizado", "Falta hacer", "Anulado", "Otro estado", "Total"]]
+    else:
+        _export_start = pd.Timestamp(fecha_desde)
+        _export_end = pd.Timestamp(fecha_hasta)
 
     pdf_buffer = io.BytesIO()
 
@@ -1279,7 +1328,7 @@ def generar_pdf_informe():
         canvas.restoreState()
 
     suc_txt = ", ".join(sucursal) if sucursal else "Todas"
-    periodo_txt = f"{fecha_desde.strftime('%d/%m/%Y')} al {fecha_hasta.strftime('%d/%m/%Y')}"
+    periodo_txt = f"{_export_start.strftime('%d/%m/%Y')} al {_export_end.strftime('%d/%m/%Y')}"
     fecha_generacion = date.today().strftime("%d/%m/%Y")
 
     total_base = len(base)
@@ -1491,55 +1540,169 @@ def generar_pdf_informe():
 
 with tabs[6]:
     st.subheader("📥 Exportar resultados")
+    st.write(
+        "Elegí el período que querés incluir en la exportación. "
+        "Este período es independiente del período general de la barra lateral."
+    )
 
-    ant_export = cruz_final.copy()
-    resumen_export = tabla.copy()
+    tipo_periodo_export = st.radio(
+        "Período de exportación",
+        ["Período analizado", "Período personalizado"],
+        horizontal=True,
+        key="tipo_periodo_export"
+    )
 
+    if tipo_periodo_export == "Período analizado":
+        export_desde = fecha_desde
+        export_hasta = fecha_hasta
+        st.info(
+            f"Se exportará el período analizado: **{export_desde.strftime('%d/%m/%Y')}** "
+            f"al **{export_hasta.strftime('%d/%m/%Y')}**."
+        )
+    else:
+        ec1, ec2 = st.columns(2)
+        with ec1:
+            export_desde = st.date_input(
+                "Desde",
+                value=fecha_desde,
+                min_value=min_date,
+                max_value=max_date,
+                key="export_desde_personalizado"
+            )
+        with ec2:
+            export_hasta = st.date_input(
+                "Hasta",
+                value=fecha_hasta,
+                min_value=min_date,
+                max_value=max_date,
+                key="export_hasta_personalizado"
+            )
+
+        if export_desde > export_hasta:
+            st.error("La fecha Desde no puede ser posterior a Hasta.")
+            st.stop()
+
+        st.success(
+            f"Período personalizado seleccionado: **{export_desde.strftime('%d/%m/%Y')}** "
+            f"al **{export_hasta.strftime('%d/%m/%Y')}**."
+        )
+
+    # ---------------------------------------------------------
+    # Construir los datos de exportación para el período elegido
+    # ---------------------------------------------------------
+    export_start = pd.Timestamp(export_desde)
+    export_end = pd.Timestamp(export_hasta)
+
+    base_export = df[
+        (df["_sucursal"].isin(sucursal)) &
+        (df["_fecha"].notna()) &
+        (df["_fecha"] >= export_start) &
+        (df["_fecha"] <= export_end) &
+        (df["_caso"].isin(casos))
+    ].copy()
+
+    base_export["antiguedad"] = (export_end - base_export["_fecha"]).dt.days
+    base_export["situacion"] = base_export["_estado"].apply(
+        lambda x:
+            "Realizado" if x in REALIZADO else
+            "Falta hacer" if x in PENDIENTES else
+            "Anulado" if x in ANULADO else
+            "Otro estado"
+    )
+
+    realizados_export = base_export[base_export["situacion"] == "Realizado"].copy()
+    pendientes_export = base_export[base_export["situacion"] == "Falta hacer"].copy()
+    anulados_export = base_export[base_export["situacion"] == "Anulado"].copy()
+    otros_export = base_export[base_export["situacion"] == "Otro estado"].copy()
+    pendientes_export["intervalo"] = pendientes_export["antiguedad"].apply(age_bucket)
+
+    entradas_export = base_export.copy()
+
+    tabla_export = pd.crosstab(base_export["_caso"], base_export["situacion"])
+    for estado_export in ["Realizado", "Falta hacer", "Anulado", "Otro estado"]:
+        if estado_export not in tabla_export.columns:
+            tabla_export[estado_export] = 0
+    tabla_export["Total"] = tabla_export.sum(axis=1)
+    tabla_export = tabla_export.reset_index().rename(columns={"_caso": "Caso"})
+    tabla_export = tabla_export[["Caso", "Realizado", "Falta hacer", "Anulado", "Otro estado", "Total"]]
+
+    cruz_export = pd.crosstab(pendientes_export["intervalo"], pendientes_export["_caso"])
+    cruz_export = cruz_export.reindex(INTERVALOS, fill_value=0)
+    for caso_export in casos:
+        if caso_export not in cruz_export.columns:
+            cruz_export[caso_export] = 0
+    cruz_export = cruz_export[casos]
+    cruz_export["TOTAL"] = cruz_export.sum(axis=1)
+    total_export = cruz_export.sum(axis=0).to_frame().T
+    total_export.index = ["TOTAL"]
+    cruz_final_export = pd.concat([cruz_export, total_export])
+
+    # ---------------------------------------------------------
+    # Excel
+    # ---------------------------------------------------------
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        resumen_export.to_excel(writer, sheet_name="Resumen", index=False)
-        ant_export.to_excel(writer, sheet_name="Antiguedad")
-        if not pendientes.empty:
-            det = pendientes.copy()
+        tabla_export.to_excel(writer, sheet_name="Resumen", index=False)
+        cruz_final_export.to_excel(writer, sheet_name="Antiguedad")
+
+        if not pendientes_export.empty:
+            det = pendientes_export.copy()
             export_cols = []
-            if col["numero_os"]: export_cols.append(col["numero_os"])
+            if col["numero_os"]:
+                export_cols.append(col["numero_os"])
             export_cols += [
                 col["fecha_creacion"], col["estado"],
                 col["sucursal"], col["caso"]
             ]
-            if col["localidad"]: export_cols.append(col["localidad"])
-            if col["tipo_os"]: export_cols.append(col["tipo_os"])
+            if col["localidad"]:
+                export_cols.append(col["localidad"])
+            if col["tipo_os"]:
+                export_cols.append(col["tipo_os"])
             export_cols = list(dict.fromkeys(export_cols))
             det[export_cols + ["antiguedad", "intervalo"]].to_excel(
                 writer, sheet_name="Pendientes", index=False
             )
-        if not realizados.empty:
-            realizados.to_excel(writer, sheet_name="Realizados", index=False)
+
+        if not realizados_export.empty:
+            realizados_export.to_excel(writer, sheet_name="Realizados", index=False)
+
+        if not base_export.empty:
+            base_export.to_excel(writer, sheet_name="Datos período", index=False)
 
     st.download_button(
         "⬇️ Descargar análisis completo en Excel",
         data=buffer.getvalue(),
-        file_name=f"analisis_OS_{'_'.join(sucursal)}_{fecha_hasta.strftime('%Y%m%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        file_name=(
+            f"analisis_OS_{'_'.join(sucursal)}_"
+            f"{export_desde.strftime('%Y%m%d')}_"
+            f"{export_hasta.strftime('%Y%m%d')}.xlsx"
+        ),
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_excel_export"
+    )
+
+    st.caption(
+        f"Exportación preparada para {export_desde.strftime('%d/%m/%Y')} "
+        f"al {export_hasta.strftime('%d/%m/%Y')} | "
+        f"Sucursal/es: {', '.join(sucursal)}"
     )
 
     st.markdown("---")
     st.subheader("📄 Informe ejecutivo en PDF")
     st.write(
-        "Genera un informe PDF con el período y filtros actuales, siguiendo el estilo del "
-        "informe de planificación compartido: resumen ejecutivo, indicadores, tablas, "
-        "productividad, cierres por operador y proyección."
+        "Genera un informe PDF con el mismo período elegido arriba, "
+        "manteniendo el estilo del informe ejecutivo."
     )
 
     try:
-        pdf_bytes = generar_pdf_informe()
+        pdf_bytes = generar_pdf_informe(export_desde, export_hasta)
         st.download_button(
             "📄 Descargar informe ejecutivo en PDF",
             data=pdf_bytes,
             file_name=(
                 f"informe_OS_{'_'.join(sucursal)}_"
-                f"{fecha_desde.strftime('%Y%m%d')}_"
-                f"{fecha_hasta.strftime('%Y%m%d')}.pdf"
+                f"{export_desde.strftime('%Y%m%d')}_"
+                f"{export_hasta.strftime('%Y%m%d')}.pdf"
             ),
             mime="application/pdf",
             key="download_pdf_informe"
