@@ -1074,6 +1074,417 @@ with tabs[5]:
                 f"**{fmt(fin['Backlog final'])} OS**."
             )
 
+
+# ============================================================
+# GENERADOR DE PDF - INFORME EJECUTIVO
+# ============================================================
+def generar_pdf_informe():
+    """Genera un informe PDF dinámico con el mismo enfoque visual
+    del informe de planificación: título, resumen ejecutivo,
+    indicadores, tablas y gráficos simples."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.platypus import (
+            SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+            PageBreak, KeepTogether
+        )
+        from reportlab.graphics.shapes import Drawing
+        from reportlab.graphics.charts.barcharts import VerticalBarChart
+        from reportlab.graphics.charts.linecharts import HorizontalLineChart
+        from reportlab.graphics.charts.legends import Legend
+        from reportlab.lib.colors import HexColor
+    except ImportError as e:
+        raise RuntimeError(
+            "Para generar PDF falta la librería reportlab. "
+            "Instalala con: pip install reportlab"
+        ) from e
+
+    pdf_buffer = io.BytesIO()
+
+    # Paleta inspirada en el informe compartido.
+    azul = colors.HexColor("#1F4E79")
+    azul_claro = colors.HexColor("#D9EAF7")
+    gris = colors.HexColor("#666666")
+    gris_claro = colors.HexColor("#F2F2F2")
+    negro = colors.HexColor("#111111")
+    blanco = colors.white
+
+    doc = SimpleDocTemplate(
+        pdf_buffer,
+        pagesize=A4,
+        rightMargin=1.45*cm,
+        leftMargin=1.45*cm,
+        topMargin=1.35*cm,
+        bottomMargin=1.35*cm,
+        title="Análisis y gestión de Órdenes de Servicio",
+        author="Gestión de Órdenes de Servicio",
+    )
+
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        name="TituloInforme",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=18,
+        leading=22,
+        alignment=TA_CENTER,
+        textColor=negro,
+        spaceAfter=8,
+    ))
+    styles.add(ParagraphStyle(
+        name="SubtituloInforme",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=10.5,
+        leading=14,
+        alignment=TA_CENTER,
+        textColor=negro,
+        spaceAfter=7,
+    ))
+    styles.add(ParagraphStyle(
+        name="FechaInforme",
+        parent=styles["Normal"],
+        fontName="Helvetica-Oblique",
+        fontSize=9.5,
+        leading=12,
+        alignment=TA_CENTER,
+        textColor=gris,
+        spaceAfter=16,
+    ))
+    styles.add(ParagraphStyle(
+        name="SeccionInforme",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=13,
+        leading=16,
+        textColor=azul,
+        spaceBefore=5,
+        spaceAfter=7,
+    ))
+    styles.add(ParagraphStyle(
+        name="TextoInforme",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=9.2,
+        leading=13,
+        textColor=negro,
+        spaceAfter=7,
+    ))
+    styles.add(ParagraphStyle(
+        name="TextoNegrita",
+        parent=styles["BodyText"],
+        fontName="Helvetica-Bold",
+        fontSize=9.2,
+        leading=13,
+        textColor=negro,
+        spaceAfter=7,
+    ))
+    styles.add(ParagraphStyle(
+        name="PieInforme",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=7.5,
+        leading=9,
+        textColor=gris,
+    ))
+
+    def P(text, style="TextoInforme"):
+        return Paragraph(str(text), styles[style])
+
+    def moneyless(n):
+        try:
+            return fmt(n)
+        except Exception:
+            return str(n)
+
+    def table_pdf(data, widths=None, header=True, font_size=7.5):
+        # Convertimos todo a Paragraph para que las tablas largas no se desborden.
+        converted = []
+        for r, row in enumerate(data):
+            converted.append([
+                Paragraph(str(v), ParagraphStyle(
+                    name=f"cell_{r}_{i}",
+                    fontName="Helvetica-Bold" if (header and r == 0) else "Helvetica",
+                    fontSize=font_size,
+                    leading=font_size + 2,
+                    textColor=blanco if (header and r == 0) else negro,
+                ))
+                for i, v in enumerate(row)
+            ])
+        t = Table(converted, colWidths=widths, repeatRows=1 if header else 0, hAlign="LEFT")
+        commands = [
+            ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#888888")),
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("LEFTPADDING", (0,0), (-1,-1), 4),
+            ("RIGHTPADDING", (0,0), (-1,-1), 4),
+            ("TOPPADDING", (0,0), (-1,-1), 3),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+        ]
+        if header:
+            commands += [
+                ("BACKGROUND", (0,0), (-1,0), azul),
+                ("TEXTCOLOR", (0,0), (-1,0), blanco),
+            ]
+            if len(converted) > 1:
+                commands.append(("ROWBACKGROUNDS", (0,1), (-1,-1), [blanco, gris_claro]))
+        t.setStyle(TableStyle(commands))
+        return t
+
+    def grafico_barras_simple(labels, valores, titulo, ancho=17*cm, alto=7*cm):
+        """Gráfico de barras compacto, con estética similar al informe de referencia."""
+        d = Drawing(ancho, alto)
+        chart = VerticalBarChart()
+        chart.x = 38
+        chart.y = 28
+        chart.width = ancho - 55
+        chart.height = alto - 48
+        chart.data = [list(map(float, valores))]
+        chart.categoryAxis.categoryNames = [str(x)[:18] for x in labels]
+        chart.valueAxis.valueMin = 0
+        max_val = max([float(x) for x in valores], default=1)
+        chart.valueAxis.valueMax = max(1, max_val * 1.18)
+        chart.valueAxis.valueStep = max(1, round(chart.valueAxis.valueMax / 5))
+        chart.bars[0].fillColor = azul
+        chart.bars[0].strokeColor = azul
+        chart.categoryAxis.labels.fontName = "Helvetica"
+        chart.categoryAxis.labels.fontSize = 6.5
+        chart.categoryAxis.labels.angle = 35
+        chart.valueAxis.labels.fontName = "Helvetica"
+        chart.valueAxis.labels.fontSize = 7
+        chart.valueAxis.strokeColor = colors.HexColor("#999999")
+        chart.categoryAxis.strokeColor = colors.HexColor("#999999")
+        d.add(chart)
+        d.add(Paragraph(str(titulo), ParagraphStyle(
+            name="GraficoTitulo",
+            fontName="Helvetica",
+            fontSize=9,
+            leading=11,
+            alignment=TA_CENTER,
+            textColor=negro,
+        )))
+        return d
+
+    def pie_pagina(canvas, doc_obj):
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor("#D0D0D0"))
+        canvas.line(doc_obj.leftMargin, 0.95*cm, A4[0]-doc_obj.rightMargin, 0.95*cm)
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(gris)
+        canvas.drawString(doc_obj.leftMargin, 0.58*cm, "Gestión de Órdenes de Servicio")
+        canvas.drawRightString(A4[0]-doc_obj.rightMargin, 0.58*cm, f"Página {doc_obj.page}")
+        canvas.restoreState()
+
+    suc_txt = ", ".join(sucursal) if sucursal else "Todas"
+    periodo_txt = f"{fecha_desde.strftime('%d/%m/%Y')} al {fecha_hasta.strftime('%d/%m/%Y')}"
+    fecha_generacion = date.today().strftime("%d/%m/%Y")
+
+    total_base = len(base)
+    total_realizados = len(realizados)
+    total_pendientes = len(pendientes)
+    total_anulados = len(anulados)
+    total_otros = len(otros)
+
+    edad_prom = pendientes["antiguedad"].mean() if not pendientes.empty else 0
+    edad_mediana = pendientes["antiguedad"].median() if not pendientes.empty else 0
+    edad_max = pendientes["antiguedad"].max() if not pendientes.empty else 0
+    pendientes_10 = int((pendientes["antiguedad"] >= 10).sum()) if not pendientes.empty else 0
+
+    # Entradas diarias del período general.
+    entradas_diarias = (
+        entradas_periodo.groupby(entradas_periodo["_fecha"].dt.normalize()).size()
+        if not entradas_periodo.empty else pd.Series(dtype=float)
+    )
+    ingreso_prom = float(entradas_diarias.mean()) if not entradas_diarias.empty else 0
+
+    # Productividad histórica del período seleccionado.
+    prod_cierres = int(total_cerradas) if "total_cerradas" in globals() else 0
+    prod_prom_dia = float(promedio_dia) if "promedio_dia" in globals() else 0
+
+    capacidad_actual = None
+    saldo_actual = None
+    if "q" in globals() and "prod" in globals() and "nuevos" in globals():
+        capacidad_actual = q * prod
+        saldo_actual = capacidad_actual - nuevos
+
+    story = []
+
+    story += [
+        P("ANÁLISIS Y GESTIÓN DE ÓRDENES DE SERVICIO", "TituloInforme"),
+        P("Situación actual, productividad y proyección operativa", "SubtituloInforme"),
+        P(f"Información analizada al {fecha_generacion} | Período: {periodo_txt} | Sucursal: {suc_txt}", "FechaInforme"),
+        P("1. Resumen ejecutivo", "SeccionInforme"),
+    ]
+
+    story.append(P(
+        f"<b>Situación actual.</b> El período seleccionado contiene <b>{moneyless(total_base)}</b> órdenes "
+        f"de servicio de los casos seleccionados. Al cierre del período hay <b>{moneyless(total_pendientes)}</b> "
+        f"órdenes pendientes, <b>{moneyless(total_realizados)}</b> realizadas, <b>{moneyless(total_anulados)}</b> anuladas "
+        f"y <b>{moneyless(total_otros)}</b> en otros estados."
+    ))
+    story.append(P(
+        f"<b>Antigüedad.</b> Entre las órdenes pendientes, la antigüedad promedio es de "
+        f"<b>{edad_prom:.1f} días</b>, la mediana es de <b>{edad_mediana:.0f} días</b> y la máxima es de "
+        f"<b>{edad_max:.0f} días</b>. Hay <b>{moneyless(pendientes_10)}</b> órdenes con 10 días o más."
+    ))
+    story.append(P(
+        f"<b>Productividad.</b> Para el período de productividad seleccionado se registraron "
+        f"<b>{moneyless(prod_cierres)}</b> cierres, con un promedio de <b>{prod_prom_dia:.1f} cierres/día</b>. "
+        f"La medición utiliza la fecha de calendario y el estado CERRADA."
+    ))
+    if capacidad_actual is not None:
+        story.append(P(
+            f"<b>Proyección.</b> Con {q} cuadrillas a {prod} trabajos por cuadrilla/día y "
+            f"{nuevos:g} nuevas OS/día, la capacidad calculada es de <b>{moneyless(capacidad_actual)}</b> trabajos/día "
+            f"y el saldo neto es de <b>{moneyless(saldo_actual)}</b> OS/día."
+        ))
+
+    story += [Spacer(1, 4), P("2. Indicadores principales", "SeccionInforme")]
+    indicadores = [
+        ["Indicador", "Resultado", "Interpretación", "Fuente"],
+        ["Órdenes del período", moneyless(total_base), "Cartera considerada", "Órdenes de servicio"],
+        ["Órdenes pendientes", moneyless(total_pendientes), "Situación al final del período", "Órdenes de servicio"],
+        ["Antigüedad promedio", f"{edad_prom:.1f} días", "Demora media de pendientes", "Cálculo"],
+        ["Pendientes con 10+ días", moneyless(pendientes_10), "Grupo prioritario", "Cálculo"],
+        ["Órdenes realizadas", moneyless(total_realizados), "Estado CERRADA", "Órdenes de servicio"],
+        ["Cierres productividad", moneyless(prod_cierres), "Período de productividad", "Fecha Calendario"],
+        ["Promedio cierres/día", f"{prod_prom_dia:.1f}", "Media del período elegido", "Cálculo"],
+    ]
+    story.append(table_pdf(indicadores, widths=[4.1*cm, 2.6*cm, 5.0*cm, 4.0*cm], font_size=7.1))
+
+    story += [Spacer(1, 9), P("3. Situación por caso asociado", "SeccionInforme")]
+    caso_rows = [["Caso asociado", "Realizado", "Falta hacer", "Anulado", "Otros", "Total"]]
+    if not tabla.empty:
+        for _, r in tabla.iterrows():
+            caso_rows.append([
+                r.get("Caso", ""),
+                moneyless(r.get("Realizado", 0)),
+                moneyless(r.get("Falta hacer", 0)),
+                moneyless(r.get("Anulado", 0)),
+                moneyless(r.get("Otro estado", 0)),
+                moneyless(r.get("Total", 0)),
+            ])
+    story.append(table_pdf(caso_rows, widths=[5.1*cm, 2.1*cm, 2.3*cm, 2.1*cm, 1.8*cm, 2.0*cm], font_size=7.2))
+
+    if not tabla.empty:
+        try:
+            caso_labels = tabla["Caso"].astype(str).tolist()
+            caso_vals = tabla["Realizado"].fillna(0).astype(float).tolist()
+            story += [Spacer(1, 8), grafico_barras_simple(caso_labels, caso_vals, "Órdenes realizadas por caso asociado")]
+        except Exception:
+            pass
+
+    story += [PageBreak(), P("4. Productividad por personal", "SeccionInforme")]
+    story.append(P(
+        f"Período de productividad: <b>{prod_desde.strftime('%d/%m/%Y')}</b> al "
+        f"<b>{prod_hasta.strftime('%d/%m/%Y')}</b>. Sucursal/es: <b>{suc_txt}</b>. "
+        f"Fecha utilizada: <b>{col_fecha_medicion}</b>."
+    ))
+    if "prod_data" in globals() and not prod_data.empty:
+        rows_prod = [["Confeccionada Por", "Total Órdenes", "Órdenes Cerradas", "Efectividad Cierre (%)"]]
+        for _, r in prod_data.iterrows():
+            rows_prod.append([
+                r.get("Confeccionada Por", ""),
+                moneyless(r.get("Total Órdenes", 0)),
+                moneyless(r.get("Órdenes Cerradas", 0)),
+                f"{float(r.get('Efectividad Cierre (%)', 0)):.1f}",
+            ])
+        story.append(table_pdf(rows_prod, widths=[6.4*cm, 3.0*cm, 3.2*cm, 4.0*cm], font_size=7.4))
+        try:
+            top_prod = prod_data.head(12)
+            story += [Spacer(1, 8), grafico_barras_simple(
+                top_prod["Confeccionada Por"].astype(str).tolist(),
+                top_prod["Órdenes Cerradas"].astype(float).tolist(),
+                "Órdenes cerradas por operador"
+            )]
+        except Exception:
+            pass
+    else:
+        story.append(P("No se encontraron datos de productividad para el período seleccionado."))
+
+    story += [Spacer(1, 10), P("5. Cierres por operador por día", "SeccionInforme")]
+    if "matriz" in globals() and not matriz.empty:
+        mat = matriz.copy()
+        # Limitar la matriz a un máximo razonable para el PDF; la app conserva todos los datos.
+        cols = list(mat.columns)
+        if len(cols) > 15:
+            cols = [cols[0]] + cols[1:15] + (["TOTAL"] if "TOTAL" in cols else [])
+            mat = mat[cols]
+        story.append(table_pdf([list(mat.columns)] + mat.astype(str).values.tolist(), font_size=6.2))
+    else:
+        story.append(P("No hay cierres para mostrar."))
+
+    story += [PageBreak(), P("6. Casos de trabajo cerrados por operador", "SeccionInforme")]
+    if "casos_operador" in globals() and not casos_operador.empty:
+        rows_casos = [list(casos_operador.columns)] + casos_operador.astype(str).values.tolist()
+        story.append(table_pdf(rows_casos, font_size=6.8))
+    else:
+        story.append(P("No hay casos de trabajo cerrados para el período seleccionado."))
+
+    story += [Spacer(1, 10), P("7. Productividad día por día", "SeccionInforme")]
+    if "diario" in globals() and not diario.empty:
+        diario_pdf = diario.copy()
+        diario_pdf["Fecha"] = pd.to_datetime(diario_pdf["Fecha"], errors="coerce").dt.strftime("%d/%m/%Y")
+        story.append(table_pdf([list(diario_pdf.columns)] + diario_pdf.astype(str).values.tolist(), widths=[5*cm, 3.5*cm], font_size=7.2))
+    else:
+        story.append(P("No hay cierres para mostrar día por día."))
+
+    story += [PageBreak(), P("8. Proyección operativa", "SeccionInforme")]
+    story.append(P(
+        f"La proyección parte de <b>{moneyless(total_pendientes)}</b> OS pendientes al final del período. "
+        f"Los parámetros utilizados en la pestaña de proyección son editables desde la aplicación."
+    ))
+    if "proj" in globals() and isinstance(proj, pd.DataFrame) and not proj.empty:
+        filas = [["Día", "Fecha", "Backlog inicio", "Trabajos realizados", "Nuevas OS", "Backlog final"]]
+        # Mostrar una muestra representativa si son demasiadas filas.
+        proj_pdf = proj.copy()
+        if len(proj_pdf) > 30:
+            proj_pdf = pd.concat([proj_pdf.head(15), proj_pdf.tail(15)])
+        for _, r in proj_pdf.iterrows():
+            filas.append([
+                r.get("Día", ""),
+                pd.to_datetime(r.get("Fecha"), errors="coerce").strftime("%d/%m/%Y") if pd.notna(r.get("Fecha")) else "",
+                r.get("Backlog inicio", ""),
+                r.get("Trabajos realizados", ""),
+                r.get("Nuevas OS", ""),
+                r.get("Backlog final", ""),
+            ])
+        story.append(table_pdf(filas, widths=[1.2*cm, 3.0*cm, 3.0*cm, 3.1*cm, 2.5*cm, 3.0*cm], font_size=6.8))
+        fin = proj.iloc[-1]
+        if float(fin.get("Backlog final", 1)) <= 0:
+            story.append(Spacer(1, 6))
+            story.append(P(
+                f"<b>Conclusión:</b> el backlog llega a cero el <b>{pd.to_datetime(fin['Fecha']).strftime('%d/%m/%Y')}</b>.",
+                "TextoNegrita"
+            ))
+        else:
+            story.append(P(
+                f"<b>Conclusión:</b> después de {int(fin.get('Día', 0))} días quedan aproximadamente "
+                f"<b>{moneyless(fin.get('Backlog final', 0))} OS</b>.", "TextoNegrita"
+            ))
+    else:
+        story.append(P("No hay una proyección calculada para los parámetros actuales."))
+
+    story += [Spacer(1, 12), P("9. Observaciones", "SeccionInforme")]
+    story.append(P(
+        "Este documento es una fotografía de los datos disponibles en la aplicación y respeta los filtros "
+        "seleccionados al momento de exportar. La productividad se calcula sobre órdenes CERRADA según la "
+        "fecha de calendario. La categoría <b>OS POR REPARACIONES/INTERNAS</b> se identifica desde la columna "
+        "<b>Tipo de OS</b> cuando contiene <b>OS POR REPARACIONES/INSTALACIONES INTERNAS</b>."
+    ))
+    story.append(P(
+        "La proyección es un escenario matemático y no incorpora automáticamente feriados, ausencias, zonas, "
+        "tiempos de viaje o diferencias de productividad entre cuadrillas.",
+    ))
+
+    doc.build(story, onFirstPage=pie_pagina, onLaterPages=pie_pagina)
+    pdf_buffer.seek(0)
+    return pdf_buffer.getvalue()
+
+
 # ============================================================
 # TAB 7 - EXPORTAR
 # ============================================================
@@ -1111,4 +1522,28 @@ with tabs[6]:
         file_name=f"analisis_OS_{'_'.join(sucursal)}_{fecha_hasta.strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+    st.markdown("---")
+    st.subheader("📄 Informe ejecutivo en PDF")
+    st.write(
+        "Genera un informe PDF con el período y filtros actuales, siguiendo el estilo del "
+        "informe de planificación compartido: resumen ejecutivo, indicadores, tablas, "
+        "productividad, cierres por operador y proyección."
+    )
+
+    try:
+        pdf_bytes = generar_pdf_informe()
+        st.download_button(
+            "📄 Descargar informe ejecutivo en PDF",
+            data=pdf_bytes,
+            file_name=(
+                f"informe_OS_{'_'.join(sucursal)}_"
+                f"{fecha_desde.strftime('%Y%m%d')}_"
+                f"{fecha_hasta.strftime('%Y%m%d')}.pdf"
+            ),
+            mime="application/pdf",
+            key="download_pdf_informe"
+        )
+    except Exception as e:
+        st.error(f"No se pudo generar el PDF: {e}")
 
