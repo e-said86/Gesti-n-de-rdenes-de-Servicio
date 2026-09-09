@@ -19,7 +19,11 @@ CASOS = [
     "TRASLADO DE SERVICIO",
     "CLIENTE SIN SERVICIO",
     "CAMBIO DE PLAN",
+    "OS POR REPARACIONES/INTERNAS",
 ]
+
+CASO_REPARACIONES = "OS POR REPARACIONES/INTERNAS"
+TIPO_OS_REPARACIONES = "OS POR REPARACIONES/INSTALACIONES INTERNAS"
 
 PENDIENTES = {"PENDIENTE", "CONFIRMADA", "POSPUESTA", "INICIADA"}
 REALIZADO = {"CERRADA"}
@@ -134,6 +138,7 @@ if uploaded is None:
 - TRASLADO DE SERVICIO
 - CLIENTE SIN SERVICIO
 - CAMBIO DE PLAN
+- OS POR REPARACIONES/INTERNAS (identificado desde Tipo de OS)
 
 **Estados:**
 - Realizado = CERRADA
@@ -166,6 +171,25 @@ if missing:
 df = raw.copy()
 df["_estado"] = df[col["estado"]].astype(str).str.strip().str.upper()
 df["_caso"] = df[col["caso"]].astype(str).str.strip().str.upper()
+
+# OS por Reparaciones/instalaciones internas se identifica por TIPO DE OS,
+# no por la columna Caso Asociado. Para el análisis se presenta como una
+# categoría adicional dentro de "Caso asociado".
+if col.get("tipo_os"):
+    # Normalizamos el valor de Tipo de OS para que la detección no dependa
+    # de mayúsculas/minúsculas, espacios, guiones o acentos.
+    _tipo_os_norm = (
+        df[col["tipo_os"]]
+        .fillna("")
+        .astype(str)
+        .map(norm)
+    )
+    _tipo_reparaciones_norm = norm(TIPO_OS_REPARACIONES)
+    df.loc[
+        _tipo_os_norm == _tipo_reparaciones_norm,
+        "_caso"
+    ] = CASO_REPARACIONES
+
 df["_sucursal"] = df[col["sucursal"]].astype(str).str.strip().str.upper()
 df["_fecha"] = pd.to_datetime(df[col["fecha_creacion"]], errors="coerce", dayfirst=True)
 
@@ -187,22 +211,38 @@ default_suc = "CONCORDIA" if "CONCORDIA" in sucs else sucs[0]
 
 with st.sidebar:
     st.header("📅 Período analizado")
-    fecha_desde = st.date_input("Desde", value=min_date, min_value=min_date, max_value=max_date)
-    fecha_hasta = st.date_input("Hasta", value=min(max_date, date(2026, 9, 5)), min_value=min_date, max_value=max_date)
+    # Por defecto: desde el primer día del mes anteúltimo al último mes
+    # disponible en el archivo, hasta la fecha más actual disponible.
+    ultimo_mes = pd.Timestamp(max_date).replace(day=1)
+    mes_anteultimo = (ultimo_mes - pd.DateOffset(months=2)).date()
+    desde_default = max(min_date, mes_anteultimo)
+
+    fecha_desde = st.date_input(
+        "Desde",
+        value=desde_default,
+        min_value=min_date,
+        max_value=max_date
+    )
+    fecha_hasta = st.date_input(
+        "Hasta",
+        value=max_date,
+        min_value=min_date,
+        max_value=max_date
+    )
 
     if fecha_desde > fecha_hasta:
         st.error("La fecha Desde no puede ser posterior a Hasta.")
         st.stop()
 
     st.header("📍 Filtros")
-    sucursal = st.selectbox(
+    sucursal = st.multiselect(
         "Sucursal",
         sucs,
-        index=sucs.index(default_suc) if default_suc in sucs else 0
+        default=[default_suc] if default_suc in sucs else sucs
     )
 
     casos = st.multiselect(
-        "Casos de trabajo",
+        "Caso asociado",
         CASOS,
         default=CASOS
     )
@@ -214,10 +254,14 @@ with st.sidebar:
 end = pd.Timestamp(fecha_hasta)
 start = pd.Timestamp(fecha_desde)
 
+if not sucursal:
+    st.warning("Seleccioná al menos una sucursal.")
+    st.stop()
+
 base = df[
-    (df["_sucursal"] == sucursal) &
+    (df["_sucursal"].isin(sucursal)) &
     (df["_fecha"].notna()) &
-    (df["_fecha"] >= start) &  # <-- Esta es la línea nueva que agregamos
+    (df["_fecha"] >= start) &
     (df["_fecha"] <= end) &
     (df["_caso"].isin(casos))
 ].copy()
@@ -260,7 +304,7 @@ else:
 
 st.info(
     f"**Período analizado:** {fecha_desde.strftime('%d/%m/%Y')} al "
-    f"{fecha_hasta.strftime('%d/%m/%Y')} | **Sucursal:** {sucursal}"
+    f"{fecha_hasta.strftime('%d/%m/%Y')} | **Sucursal:** {', '.join(sucursal)}"
 )
 
 tabs = st.tabs([
@@ -268,9 +312,10 @@ tabs = st.tabs([
     "⏳ Antigüedad",
     "📝 Detalle",
     "👷‍♂️ Planificación de cuadrillas",
+    "👷‍♂️ Productividad",
     "📈 Proyección día a día",
     "📥 Exportar",
-    "👷‍♂️ Productividad"
+    
 ])
 
 # ============================================================
@@ -369,7 +414,7 @@ with tabs[2]:
 # ============================================================
 
 with tabs[3]:
-    st.subheader("👷 Etapa 2 — Planificación de cuadrillas")
+    st.subheader("👷 Planificación de cuadrillas")
     st.write(
         "Esta sección transforma la cartera pendiente en un plan de regularización. "
         "Los parámetros son editables para probar distintos escenarios."
@@ -448,112 +493,11 @@ with tabs[3]:
         "capacidad diferenciada, salvo que se incorporen como parámetros."
     )
 
-# ============================================================
-# TAB 5 - PROYECCIÓN
-# ============================================================
 
+# =========================================================================
+# TAB 5 - PRODUCTIVIDAD
+# =========================================================================
 with tabs[4]:
-    st.subheader("📈 Proyección día a día")
-
-    pendientes_n = len(pendientes)
-
-    p1,p2,p3 = st.columns(3)
-    with p1:
-        q = st.number_input("Cuadrillas para proyección", 1, 50, 5, key="pq")
-    with p2:
-        prod = st.number_input("Trabajos/cuadrilla/día", 1, 30, 5, key="pp")
-    with p3:
-        nuevos = st.number_input("Nuevas OS/día", 0.0, 10000.0, 0.0, step=1.0, key="pn")
-
-    max_dias = st.number_input("Máximo de días a proyectar", 7, 3650, 180)
-
-    capacidad = q * prod
-    saldo = capacidad - nuevos
-
-    rows = []
-    backlog = float(pendientes_n)
-    fecha = fecha_hasta
-
-    for i in range(1, int(max_dias)+1):
-        if backlog <= 0:
-            break
-
-        inicio = backlog
-        realizadas_plan = min(capacidad, backlog)
-        backlog = max(0, backlog - realizadas_plan + nuevos)
-
-        fecha = fecha + timedelta(days=1)
-        rows.append({
-            "Día": i,
-            "Fecha": fecha,
-            "Backlog inicio": round(inicio, 1),
-            "Trabajos realizados": round(realizadas_plan, 1),
-            "Nuevas OS": round(nuevos, 1),
-            "Backlog final": round(backlog, 1)
-        })
-
-    proj = pd.DataFrame(rows)
-
-    if saldo <= 0:
-        st.warning("La capacidad no supera el ingreso diario; el backlog no llega a cero.")
-    elif not proj.empty:
-        st.dataframe(proj, use_container_width=True, hide_index=True)
-        st.line_chart(proj.set_index("Fecha")["Backlog final"])
-
-        fin = proj.iloc[-1]
-        if fin["Backlog final"] <= 0:
-            st.success(
-                f"🎯 El backlog llega a cero el **{fin['Fecha'].strftime('%d/%m/%Y')}**."
-            )
-        else:
-            st.info(
-                f"Después de {int(fin['Día'])} días quedan aproximadamente "
-                f"**{fmt(fin['Backlog final'])} OS**."
-            )
-
-# ============================================================
-# TAB 6 - EXPORTAR
-# ============================================================
-
-with tabs[5]:
-    st.subheader("📥 Exportar resultados")
-
-    ant_export = cruz_final.copy()
-    resumen_export = tabla.copy()
-
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        resumen_export.to_excel(writer, sheet_name="Resumen", index=False)
-        ant_export.to_excel(writer, sheet_name="Antiguedad")
-        if not pendientes.empty:
-            det = pendientes.copy()
-            export_cols = []
-            if col["numero_os"]: export_cols.append(col["numero_os"])
-            export_cols += [
-                col["fecha_creacion"], col["estado"],
-                col["sucursal"], col["caso"]
-            ]
-            if col["localidad"]: export_cols.append(col["localidad"])
-            if col["tipo_os"]: export_cols.append(col["tipo_os"])
-            export_cols = list(dict.fromkeys(export_cols))
-            det[export_cols + ["antiguedad", "intervalo"]].to_excel(
-                writer, sheet_name="Pendientes", index=False
-            )
-        if not realizados.empty:
-            realizados.to_excel(writer, sheet_name="Realizados", index=False)
-
-    st.download_button(
-        "⬇️ Descargar análisis completo en Excel",
-        data=buffer.getvalue(),
-        file_name=f"analisis_OS_{sucursal}_{fecha_hasta.strftime('%Y%m%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-
-# =========================================================================
-# TAB 7 - PRODUCTIVIDAD
-# =========================================================================
-with tabs[6]:
     st.subheader("👤 Productividad por Personal")
     st.write(
         "Medición de órdenes según la columna 'Fecha Calendario', "
@@ -737,10 +681,10 @@ with tabs[6]:
         & (df_prod_base["_fecha_productividad"] < fecha_fin_exclusiva_prod)
     )
 
-    if sucursal and str(sucursal).strip().upper() != "TODAS":
+    if sucursal:
+        sucursales_norm = [str(x).strip().upper() for x in sucursal]
         criterio_prod = criterio_prod & (
-            df_prod_base["_sucursal_productividad"]
-            == str(sucursal).strip().upper()
+            df_prod_base["_sucursal_productividad"].isin(sucursales_norm)
         )
 
     df_prod = df_prod_base.loc[criterio_prod].copy()
@@ -901,7 +845,7 @@ with tabs[6]:
     # ---------------------------------------------------------
     # Matriz operador / día
     # ---------------------------------------------------------
-    st.markdown("### 👤📅 Cierres por operador y día")
+    st.markdown("### 👤📅 Cierres por operador por día")
 
     if df_prod_cerradas.empty:
         st.info("No hay datos para construir la matriz.")
@@ -940,6 +884,88 @@ with tabs[6]:
             use_container_width=True,
             hide_index=True
         )
+
+    # ---------------------------------------------------------
+    # Casos de trabajo cerrados por operador
+    # ---------------------------------------------------------
+    st.markdown("### 🧰 Casos de trabajo cerrados por operador")
+
+    if df_prod_cerradas.empty:
+        st.info("No hay casos de trabajo cerrados para el período seleccionado.")
+    else:
+        # Usamos exclusivamente las columnas internas de Productividad,
+        # evitando depender de nombres reales duplicados del archivo.
+        df_casos_cerrados = df_prod_cerradas.copy()
+
+        # Reforzar aquí la clasificación de reparaciones desde Tipo de OS.
+        # Esto garantiza que esas OS se cuenten aunque Caso Asociado venga
+        # vacío o con una variante de texto en el archivo original.
+        if col.get("tipo_os") and col["tipo_os"] in df_casos_cerrados.columns:
+            _tipo_prod_norm = (
+                df_casos_cerrados[col["tipo_os"]]
+                .fillna("")
+                .astype(str)
+                .map(norm)
+            )
+            df_casos_cerrados.loc[
+                _tipo_prod_norm == norm(TIPO_OS_REPARACIONES),
+                "_caso"
+            ] = CASO_REPARACIONES
+
+        # Usar la categoría interna _caso ya normalizada al cargar el archivo.
+        # Esto es importante porque allí se incorporan las OS por
+        # Reparaciones/Instalaciones Internas detectadas desde "Tipo de OS".
+        # Si se vuelve a leer col["caso"], esas órdenes pueden tener el
+        # "Caso Asociado" vacío y quedan afuera del conteo.
+        df_casos_cerrados["_caso_productividad"] = (
+            df_casos_cerrados["_caso"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+
+        # Solo los tipos de casos definidos para el análisis.
+        df_casos_cerrados = df_casos_cerrados[
+            df_casos_cerrados["_caso_productividad"].isin(CASOS)
+        ].copy()
+
+        if df_casos_cerrados.empty:
+            st.info(
+                "No hay casos de trabajo de los tipos seleccionados "
+                "para el período de productividad."
+            )
+        else:
+            casos_operador = pd.crosstab(
+                df_casos_cerrados["_usuario_productividad"],
+                df_casos_cerrados["_caso_productividad"]
+            )
+
+            # Asegurar que aparezcan siempre las columnas de CASOS
+            # en el mismo orden, aunque algún caso tenga 0.
+            casos_operador = casos_operador.reindex(
+                columns=CASOS,
+                fill_value=0
+            )
+
+            casos_operador["TOTAL"] = casos_operador.sum(axis=1)
+
+            casos_operador = casos_operador.sort_values(
+                "TOTAL",
+                ascending=False
+            ).reset_index()
+
+            casos_operador = casos_operador.rename(
+                columns={
+                    "_usuario_productividad": "Confeccionada Por"
+                }
+            )
+
+            st.dataframe(
+                casos_operador,
+                use_container_width=True,
+                hide_index=True
+            )
 
     # ---------------------------------------------------------
     # Control técnico específico de Productividad
@@ -983,3 +1009,106 @@ with st.expander("🔧 Control técnico / columnas detectadas"):
         df["_estado"].value_counts().rename_axis("Estado").reset_index(name="Cantidad"),
         use_container_width=True, hide_index=True
     )
+
+
+# ============================================================
+# TAB 6 - PROYECCIÓN
+# ============================================================
+
+with tabs[5]:
+    st.subheader("📈 Proyección día a día")
+
+    pendientes_n = len(pendientes)
+
+    p1,p2,p3 = st.columns(3)
+    with p1:
+        q = st.number_input("Cuadrillas para proyección", 1, 50, 5, key="pq")
+    with p2:
+        prod = st.number_input("Trabajos/cuadrilla/día", 1, 30, 5, key="pp")
+    with p3:
+        nuevos = st.number_input("Nuevas OS/día", 0.0, 10000.0, 0.0, step=1.0, key="pn")
+
+    max_dias = st.number_input("Máximo de días a proyectar", 7, 3650, 180)
+
+    capacidad = q * prod
+    saldo = capacidad - nuevos
+
+    rows = []
+    backlog = float(pendientes_n)
+    fecha = fecha_hasta
+
+    for i in range(1, int(max_dias)+1):
+        if backlog <= 0:
+            break
+
+        inicio = backlog
+        realizadas_plan = min(capacidad, backlog)
+        backlog = max(0, backlog - realizadas_plan + nuevos)
+
+        fecha = fecha + timedelta(days=1)
+        rows.append({
+            "Día": i,
+            "Fecha": fecha,
+            "Backlog inicio": round(inicio, 1),
+            "Trabajos realizados": round(realizadas_plan, 1),
+            "Nuevas OS": round(nuevos, 1),
+            "Backlog final": round(backlog, 1)
+        })
+
+    proj = pd.DataFrame(rows)
+
+    if saldo <= 0:
+        st.warning("La capacidad no supera el ingreso diario; el backlog no llega a cero.")
+    elif not proj.empty:
+        st.dataframe(proj, use_container_width=True, hide_index=True)
+        st.line_chart(proj.set_index("Fecha")["Backlog final"])
+
+        fin = proj.iloc[-1]
+        if fin["Backlog final"] <= 0:
+            st.success(
+                f"🎯 El backlog llega a cero el **{fin['Fecha'].strftime('%d/%m/%Y')}**."
+            )
+        else:
+            st.info(
+                f"Después de {int(fin['Día'])} días quedan aproximadamente "
+                f"**{fmt(fin['Backlog final'])} OS**."
+            )
+
+# ============================================================
+# TAB 7 - EXPORTAR
+# ============================================================
+
+with tabs[6]:
+    st.subheader("📥 Exportar resultados")
+
+    ant_export = cruz_final.copy()
+    resumen_export = tabla.copy()
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        resumen_export.to_excel(writer, sheet_name="Resumen", index=False)
+        ant_export.to_excel(writer, sheet_name="Antiguedad")
+        if not pendientes.empty:
+            det = pendientes.copy()
+            export_cols = []
+            if col["numero_os"]: export_cols.append(col["numero_os"])
+            export_cols += [
+                col["fecha_creacion"], col["estado"],
+                col["sucursal"], col["caso"]
+            ]
+            if col["localidad"]: export_cols.append(col["localidad"])
+            if col["tipo_os"]: export_cols.append(col["tipo_os"])
+            export_cols = list(dict.fromkeys(export_cols))
+            det[export_cols + ["antiguedad", "intervalo"]].to_excel(
+                writer, sheet_name="Pendientes", index=False
+            )
+        if not realizados.empty:
+            realizados.to_excel(writer, sheet_name="Realizados", index=False)
+
+    st.download_button(
+        "⬇️ Descargar análisis completo en Excel",
+        data=buffer.getvalue(),
+        file_name=f"analisis_OS_{'_'.join(sucursal)}_{fecha_hasta.strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
