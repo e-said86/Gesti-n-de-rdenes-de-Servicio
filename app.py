@@ -1193,7 +1193,10 @@ def generar_pdf_informe(export_desde=None, export_hasta=None):
         (df["_caso"].isin(casos))
     ].copy()
 
-    pdf_base["antiguedad"] = (pdf_hasta - pdf_base["_fecha"]).dt.days
+    pdf_base["antiguedad"] = (
+        pdf_hasta.normalize() - pdf_base["_fecha"].dt.normalize()
+    ).dt.days.clip(lower=0)
+
     pdf_base["situacion"] = pdf_base["_estado"].apply(
         lambda x:
             "Realizado" if x in REALIZADO else
